@@ -1217,7 +1217,12 @@ pub(crate) fn calculate_widget_height(
                 let visible = cache.miss_attributions.len().min(5) as u16;
                 2 + visible + u16::from(cache.miss_attributions.len() > 5)
             };
-            1 + attribution_lines
+            let session_token_line = u16::from(
+                data.usage_info
+                    .as_ref()
+                    .is_some_and(|usage| usage.available),
+            );
+            1 + session_token_line + attribution_lines
         }
         WidgetKind::ModelInfo => {
             if data.model.is_none() {
@@ -1680,6 +1685,9 @@ fn render_kv_cache_widget(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'stat
         return Vec::new();
     };
     let mut lines = vec![render_kv_cache_summary_line(cache)];
+    if let Some(usage) = data.usage_info.as_ref().filter(|usage| usage.available) {
+        lines.push(render_session_token_summary_line(usage));
+    }
 
     lines.push(Line::from(vec![Span::styled(
         "miss attribution",
@@ -1795,6 +1803,22 @@ fn render_kv_cache_summary_line(cache: &CacheHitInfo) -> Line<'static> {
     ));
 
     Line::from(spans)
+}
+
+fn render_session_token_summary_line(usage: &UsageInfo) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("In: ", Style::default().fg(rgb(140, 140, 150))),
+        Span::styled(
+            compact_token_count(usage.input_tokens),
+            Style::default().fg(rgb(180, 180, 190)),
+        ),
+        Span::styled(" / ", Style::default().fg(rgb(80, 80, 90))),
+        Span::styled("Out: ", Style::default().fg(rgb(140, 140, 150))),
+        Span::styled(
+            compact_token_count(usage.output_tokens),
+            Style::default().fg(rgb(180, 180, 190)),
+        ),
+    ])
 }
 
 fn ratio_pct(ratio: f32) -> u8 {
@@ -2096,6 +2120,9 @@ fn render_sections(
 
     if let Some(cache) = data.cache_hit_info.as_ref() {
         lines.push(render_kv_cache_summary_line(cache));
+        if let Some(usage) = data.usage_info.as_ref().filter(|usage| usage.available) {
+            lines.push(render_session_token_summary_line(usage));
+        }
     }
 
     // Git info

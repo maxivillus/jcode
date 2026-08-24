@@ -430,6 +430,12 @@ fn anchored_overview_rehomes_when_cache_summary_grows_it() {
             read_tokens: 1_500,
             ..Default::default()
         }),
+        usage_info: Some(UsageInfo {
+            input_tokens: 12_000,
+            output_tokens: 3_000,
+            available: true,
+            ..Default::default()
+        }),
         ..base
     };
     let next = calculate_placements_anchored(area, &margins, &expanded, true, &initial.anchors);
@@ -438,6 +444,6 @@ fn anchored_overview_rehomes_when_cache_summary_grows_it() {
         .iter()
         .find(|placement| placement.kind == WidgetKind::Overview)
         .expect("overview should be re-homed after its content grows");
-    assert_eq!(next_overview.rect.height, 6);
+    assert_eq!(next_overview.rect.height, 7);
     assert_placements_sane("cache-expanded overview", area, &next.visible);
 }

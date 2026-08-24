@@ -186,7 +186,15 @@ fn compact_usage_height(data: &InfoWidgetData) -> u16 {
 }
 
 fn compact_kv_cache_height(data: &InfoWidgetData) -> u16 {
-    if data.cache_hit_info.is_some() { 1 } else { 0 }
+    if data.cache_hit_info.is_some() {
+        1 + u16::from(
+            data.usage_info
+                .as_ref()
+                .is_some_and(|usage| usage.available),
+        )
+    } else {
+        0
+    }
 }
 
 fn compact_git_height(data: &InfoWidgetData) -> u16 {

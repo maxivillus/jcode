@@ -88,6 +88,7 @@ fn kv_cache_widget_shows_session_hit_ratio() {
     assert_eq!(lines.len(), 4);
     assert!(text.contains("KV cache:"));
     assert!(text.contains("Cache read: 15k"));
+    assert!(!text.contains("In:"));
     assert!(text.contains("yield "));
     assert!(text.contains("90%"));
     assert!(text.contains("last "));
@@ -105,6 +106,12 @@ fn kv_cache_widget_shows_session_hit_ratio() {
 fn overview_cache_summary_includes_cache_read_tokens() {
     let data = InfoWidgetData {
         model: Some("deepseek-v4-pro".to_string()),
+        usage_info: Some(UsageInfo {
+            input_tokens: 12_000,
+            output_tokens: 3_000,
+            available: true,
+            ..Default::default()
+        }),
         cache_hit_info: Some(CacheHitInfo {
             reported_input_tokens: 20_000,
             read_tokens: 15_000,
@@ -124,6 +131,53 @@ fn overview_cache_summary_includes_cache_read_tokens() {
 
     assert!(text.contains("KV cache:"));
     assert!(text.contains("Cache read: 15k"));
+    assert!(text.contains("In: 12k / Out: 3k"));
+
+    let line_texts: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect();
+    let cache_line = line_texts
+        .iter()
+        .position(|line| line.starts_with("Cache read:"))
+        .expect("cache summary line should be rendered");
+    assert_eq!(line_texts[cache_line + 1], "In: 12k / Out: 3k");
+}
+
+#[test]
+fn kv_cache_widget_shows_session_token_totals_below_cache_summary() {
+    let data = InfoWidgetData {
+        usage_info: Some(UsageInfo {
+            input_tokens: 12_000,
+            output_tokens: 3_000,
+            available: true,
+            ..Default::default()
+        }),
+        cache_hit_info: Some(CacheHitInfo {
+            reported_input_tokens: 20_000,
+            read_tokens: 15_000,
+            optimal_input_tokens: 16_667,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        calculate_widget_height(WidgetKind::KvCache, &data, 40, 20),
+        6
+    );
+    let lines = render_kv_cache_widget(&data, Rect::new(0, 0, 40, 5));
+    let text = lines_text_concat(&lines);
+
+    assert_eq!(lines.len(), 4);
+    assert!(text.contains("Cache read: 15k"));
+    assert!(text.contains("In: 12k / Out: 3k"));
+    assert_eq!(lines[1].spans[0].content, "In: ");
 }
 
 #[test]
