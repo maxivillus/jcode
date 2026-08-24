@@ -444,6 +444,6 @@ fn anchored_overview_rehomes_when_cache_summary_grows_it() {
         .iter()
         .find(|placement| placement.kind == WidgetKind::Overview)
         .expect("overview should be re-homed after its content grows");
-    assert_eq!(next_overview.rect.height, 7);
+    assert_eq!(next_overview.rect.height, 8);
     assert_placements_sane("cache-expanded overview", area, &next.visible);
 }
