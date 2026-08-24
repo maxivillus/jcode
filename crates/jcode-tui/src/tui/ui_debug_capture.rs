@@ -41,6 +41,16 @@ pub(super) fn build_info_widget_summary(data: &info_widget::InfoWidgetData) -> I
     let background_running = data.background_info.as_ref().map(|b| b.running_count);
     let background_tasks = data.background_info.as_ref().map(|b| b.running_tasks.len());
 
+    let cache_reported_input_tokens = data
+        .cache_hit_info
+        .as_ref()
+        .map(|cache| cache.reported_input_tokens);
+    let cache_read_tokens = data.cache_hit_info.as_ref().map(|cache| cache.read_tokens);
+    let cache_creation_tokens = data
+        .cache_hit_info
+        .as_ref()
+        .map(|cache| cache.creation_tokens);
+
     let usage_available = data.usage_info.as_ref().map(|u| u.available);
     let usage_provider = data
         .usage_info
@@ -71,6 +81,9 @@ pub(super) fn build_info_widget_summary(data: &info_widget::InfoWidgetData) -> I
         tokens_per_second: data.tokens_per_second,
         auth_method: Some(format!("{:?}", data.auth_method)),
         upstream_provider: data.upstream_provider.clone(),
+        cache_reported_input_tokens,
+        cache_read_tokens,
+        cache_creation_tokens,
     }
 }
 

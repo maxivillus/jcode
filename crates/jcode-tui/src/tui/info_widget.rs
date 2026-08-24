@@ -1746,10 +1746,15 @@ fn render_kv_cache_summary_line(cache: &CacheHitInfo) -> Line<'static> {
         .unwrap_or(lifetime_pct);
     let color = kv_cache_optimal_color(health_pct);
 
-    let mut spans = vec![Span::styled(
-        "KV cache: ",
-        Style::default().fg(rgb(180, 180, 190)).bold(),
-    )];
+    let mut spans = vec![
+        Span::styled("Cache read: ", Style::default().fg(rgb(140, 140, 150))),
+        Span::styled(
+            compact_token_count(cache.read_tokens),
+            Style::default().fg(rgb(180, 180, 190)),
+        ),
+        Span::styled(" · ", Style::default().fg(rgb(80, 80, 90))),
+        Span::styled("KV cache: ", Style::default().fg(rgb(180, 180, 190)).bold()),
+    ];
 
     if let Some(warm_pct) = warm_pct {
         spans.push(Span::styled(

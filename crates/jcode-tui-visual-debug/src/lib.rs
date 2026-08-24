@@ -153,6 +153,9 @@ pub struct InfoWidgetSummary {
     pub tokens_per_second: Option<f32>,
     pub auth_method: Option<String>,
     pub upstream_provider: Option<String>,
+    pub cache_reported_input_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_creation_tokens: Option<u64>,
 }
 
 /// Info widget capture (summary + placements)

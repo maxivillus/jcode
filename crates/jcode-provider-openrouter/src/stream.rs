@@ -415,6 +415,7 @@ impl OpenRouterStream {
                 // OpenRouter returns cached tokens in various formats depending on provider:
                 // - "cached_tokens" (OpenRouter's unified field)
                 // - "prompt_tokens_details.cached_tokens" (OpenAI-style)
+                // - "prompt_cache_hit_tokens" (DeepSeek direct API)
                 // - "cache_read_input_tokens" (Anthropic-style, passed through)
                 let cache_read_input_tokens = usage
                     .get("cached_tokens")
@@ -423,6 +424,11 @@ impl OpenRouterStream {
                         usage
                             .get("prompt_tokens_details")
                             .and_then(|d| d.get("cached_tokens"))
+                            .and_then(|t| t.as_u64())
+                    })
+                    .or_else(|| {
+                        usage
+                            .get("prompt_cache_hit_tokens")
                             .and_then(|t| t.as_u64())
                     })
                     .or_else(|| {
@@ -749,6 +755,28 @@ mod tests {
         assert!(matches!(
             event,
             Some(StreamEvent::MessageEnd { stop_reason: Some(reason) }) if reason == "length"
+        ));
+    }
+
+    #[test]
+    fn parse_next_event_maps_deepseek_prompt_cache_hit_tokens() {
+        let mut stream = test_stream();
+        stream.buffer = concat!(
+            r#"data: {"choices":[],"usage":{"prompt_tokens":1234,"completion_tokens":42,"prompt_cache_hit_tokens":1000,"prompt_cache_miss_tokens":234}}"#,
+            "\n\n"
+        )
+        .to_string();
+
+        let event = stream.parse_next_event();
+
+        assert!(matches!(
+            event,
+            Some(StreamEvent::TokenUsage {
+                input_tokens: Some(1234),
+                output_tokens: Some(42),
+                cache_read_input_tokens: Some(1000),
+                cache_creation_input_tokens: None,
+            })
         ));
     }
 

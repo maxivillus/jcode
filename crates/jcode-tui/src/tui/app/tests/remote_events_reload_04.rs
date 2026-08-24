@@ -1252,6 +1252,31 @@ fn test_info_widget_remote_openai_uses_remote_provider_for_usage_and_context() {
 }
 
 #[test]
+fn test_info_widget_remote_history_cache_totals_show_kv_cache() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_token_usage_totals = Some(crate::protocol::TokenUsageTotals {
+        messages_with_token_usage: 1,
+        input_tokens: 17_090,
+        output_tokens: 43,
+        cache_reported_input_tokens: 17_090,
+        cache_read_input_tokens: 16_768,
+        cache_creation_input_tokens: 0,
+    });
+
+    let data = crate::tui::TuiState::info_widget_data(&app);
+    let cache = data
+        .cache_hit_info
+        .as_ref()
+        .expect("remote history cache totals should populate the KV widget");
+
+    assert!(data.has_data_for(crate::tui::info_widget::WidgetKind::KvCache));
+    assert_eq!(cache.reported_input_tokens, 17_090);
+    assert_eq!(cache.read_tokens, 16_768);
+    assert_eq!(cache.creation_tokens, 0);
+}
+
+#[test]
 fn test_info_widget_remote_model_falls_back_to_model_provider_detection() {
     let mut app = create_test_app();
     app.is_remote = true;

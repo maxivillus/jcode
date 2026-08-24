@@ -3,9 +3,10 @@ use super::{
     Margins, MemoryActivity, MemoryEvent, MemoryEventKind, MemoryInfo, MemoryState, PipelineState,
     StepStatus, SwarmInfo, UsageInfo, UsageProvider, WidgetKind, calculate_placements,
     calculate_widget_height, effective_prompt_tokens, occasional_status_tip,
-    render_kv_cache_widget, render_memory_compact, render_memory_widget, render_model_widget,
-    render_todos_compact, render_todos_expanded, render_todos_widget, render_usage_compact,
-    render_usage_widget, swarm_plan_todos, truncate_smart,
+    render_kv_cache_summary_line, render_kv_cache_widget, render_memory_compact,
+    render_memory_widget, render_model_widget, render_sections, render_todos_compact,
+    render_todos_expanded, render_todos_widget, render_usage_compact, render_usage_widget,
+    swarm_plan_todos, truncate_smart,
 };
 use crate::protocol::SwarmMemberStatus;
 use ratatui::layout::Rect;
@@ -77,11 +78,16 @@ fn kv_cache_widget_shows_session_hit_ratio() {
     };
 
     assert!(data.has_data_for(WidgetKind::KvCache));
+    assert_eq!(
+        calculate_widget_height(WidgetKind::KvCache, &data, 40, 20),
+        6
+    );
     let lines = render_kv_cache_widget(&data, Rect::new(0, 0, 40, 5));
-    let text = lines_text(&lines);
+    let text = lines_text_concat(&lines);
 
     assert_eq!(lines.len(), 4);
     assert!(text.contains("KV cache:"));
+    assert!(text.contains("Cache read: 15k"));
     assert!(text.contains("yield "));
     assert!(text.contains("90%"));
     assert!(text.contains("last "));
@@ -93,6 +99,50 @@ fn kv_cache_widget_shows_session_hit_ratio() {
     assert!(text.contains("20>"));
     assert!(text.contains("69k miss"));
     assert!(text.contains("provider switch"));
+}
+
+#[test]
+fn overview_cache_summary_includes_cache_read_tokens() {
+    let data = InfoWidgetData {
+        model: Some("deepseek-v4-pro".to_string()),
+        cache_hit_info: Some(CacheHitInfo {
+            reported_input_tokens: 20_000,
+            read_tokens: 15_000,
+            creation_tokens: 3_000,
+            optimal_input_tokens: 16_667,
+            last_reported_input_tokens: None,
+            last_read_tokens: None,
+            last_creation_tokens: None,
+            last_optimal_input_tokens: None,
+            miss_attributions: Vec::new(),
+        }),
+        ..Default::default()
+    };
+
+    let lines = render_sections(&data, Rect::new(0, 0, 40, 6), None);
+    let text = lines_text_concat(&lines);
+
+    assert!(text.contains("KV cache:"));
+    assert!(text.contains("Cache read: 15k"));
+}
+
+#[test]
+fn overview_cache_summary_starts_with_cache_read_for_narrow_widgets() {
+    let cache = CacheHitInfo {
+        reported_input_tokens: 20_000,
+        read_tokens: 15_000,
+        creation_tokens: 3_000,
+        ..Default::default()
+    };
+
+    let line = render_kv_cache_summary_line(&cache);
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+
+    assert!(text.starts_with("Cache read: 15k"));
 }
 
 #[test]

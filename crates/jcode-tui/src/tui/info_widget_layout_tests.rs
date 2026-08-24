@@ -403,3 +403,41 @@ fn stale_anchor_above_shifted_area_is_rehomed_not_drawn_out_of_bounds() {
     );
     assert_placements_sane("shifted area", area1, &second.visible);
 }
+
+#[test]
+fn anchored_overview_rehomes_when_cache_summary_grows_it() {
+    let area = Rect::new(0, 0, 100, 12);
+    let margins = margins_for(40, 12, false);
+    let base = InfoWidgetData {
+        model: Some("deepseek-v4-pro".to_string()),
+        provider_name: Some("deepseek".to_string()),
+        session_count: Some(1),
+        queue_mode: Some(false),
+        ..Default::default()
+    };
+
+    let initial = calculate_placements_anchored(area, &margins, &base, true, &[]);
+    let initial_overview = initial
+        .visible
+        .iter()
+        .find(|placement| placement.kind == WidgetKind::Overview)
+        .expect("base overview should be placed");
+    assert_eq!(initial_overview.rect.height, 5);
+
+    let expanded = InfoWidgetData {
+        cache_hit_info: Some(CacheHitInfo {
+            reported_input_tokens: 2_000,
+            read_tokens: 1_500,
+            ..Default::default()
+        }),
+        ..base
+    };
+    let next = calculate_placements_anchored(area, &margins, &expanded, true, &initial.anchors);
+    let next_overview = next
+        .visible
+        .iter()
+        .find(|placement| placement.kind == WidgetKind::Overview)
+        .expect("overview should be re-homed after its content grows");
+    assert_eq!(next_overview.rect.height, 6);
+    assert_placements_sane("cache-expanded overview", area, &next.visible);
+}

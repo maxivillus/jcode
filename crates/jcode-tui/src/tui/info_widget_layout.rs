@@ -296,6 +296,19 @@ pub(crate) fn calculate_placements_anchored(
             fit_width.min(prev.rect.width)
         };
 
+        // An anchor stores the dimensions selected for the previous data
+        // snapshot. If the current content no longer fits in that rectangle
+        // (for example, Overview gained its cache-read summary line), discard
+        // the stale anchor and let Phase 2 re-home the widget into a pocket
+        // large enough for the new content. Keeping the old anchor would make
+        // render_single_widget reject the box while the placement state still
+        // claimed that it was visible.
+        if kept_width >= MIN_WIDGET_WIDTH
+            && calculate_widget_height(prev.kind, data, kept_width, prev.rect.height) == 0
+        {
+            continue;
+        }
+
         if !renderable || kept_width < MIN_WIDGET_WIDTH {
             // The slot can't show the widget this frame (a wide line scrolled under
             // it). Keep the anchor and hide in place so it returns to the same spot

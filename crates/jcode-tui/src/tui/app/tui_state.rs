@@ -1507,34 +1507,45 @@ impl crate::tui::TuiState for App {
             None
         };
 
+        // Remote history carries the completed calls that were present when the
+        // session snapshot was loaded. Local accounting carries only calls
+        // observed after that snapshot, so merge both sources for the widget.
+        let remote_cache_totals = self.remote_token_usage_totals;
+        let reported_cache_input_tokens = remote_cache_totals
+            .map(|totals| totals.cache_reported_input_tokens)
+            .unwrap_or(0)
+            .saturating_add(self.token_accounting.total_cache_reported_input_tokens);
+        let cache_read_tokens = remote_cache_totals
+            .map(|totals| totals.cache_read_input_tokens)
+            .unwrap_or(0)
+            .saturating_add(self.token_accounting.total_cache_read_tokens);
+        let cache_creation_tokens = remote_cache_totals
+            .map(|totals| totals.cache_creation_input_tokens)
+            .unwrap_or(0)
+            .saturating_add(self.token_accounting.total_cache_creation_tokens);
+
         let cache_hit_info =
-            (self.token_accounting.total_cache_reported_input_tokens > 0).then(|| {
-                crate::tui::info_widget::CacheHitInfo {
-                    reported_input_tokens: self.token_accounting.total_cache_reported_input_tokens,
-                    read_tokens: self.token_accounting.total_cache_read_tokens,
-                    creation_tokens: self.token_accounting.total_cache_creation_tokens,
-                    optimal_input_tokens: self.token_accounting.total_cache_optimal_input_tokens,
-                    last_reported_input_tokens: self
-                        .token_accounting
-                        .last_cache_reported_input_tokens,
-                    last_read_tokens: self.token_accounting.last_cache_read_tokens,
-                    last_creation_tokens: self.token_accounting.last_cache_creation_tokens,
-                    last_optimal_input_tokens: self
-                        .token_accounting
-                        .last_cache_optimal_input_tokens,
-                    miss_attributions: self
-                        .kv_cache
-                        .kv_cache_miss_samples
-                        .iter()
-                        .rev()
-                        .map(|sample| crate::tui::info_widget::CacheMissAttribution {
-                            turn_number: sample.turn_number,
-                            call_index: sample.call_index,
-                            missed_tokens: sample.missed_tokens,
-                            reason: sample.reason.label().to_string(),
-                        })
-                        .collect(),
-                }
+            (reported_cache_input_tokens > 0).then(|| crate::tui::info_widget::CacheHitInfo {
+                reported_input_tokens: reported_cache_input_tokens,
+                read_tokens: cache_read_tokens,
+                creation_tokens: cache_creation_tokens,
+                optimal_input_tokens: self.token_accounting.total_cache_optimal_input_tokens,
+                last_reported_input_tokens: self.token_accounting.last_cache_reported_input_tokens,
+                last_read_tokens: self.token_accounting.last_cache_read_tokens,
+                last_creation_tokens: self.token_accounting.last_cache_creation_tokens,
+                last_optimal_input_tokens: self.token_accounting.last_cache_optimal_input_tokens,
+                miss_attributions: self
+                    .kv_cache
+                    .kv_cache_miss_samples
+                    .iter()
+                    .rev()
+                    .map(|sample| crate::tui::info_widget::CacheMissAttribution {
+                        turn_number: sample.turn_number,
+                        call_index: sample.call_index,
+                        missed_tokens: sample.missed_tokens,
+                        reason: sample.reason.label().to_string(),
+                    })
+                    .collect(),
             });
 
         // Get active mermaid diagrams - only for margin mode (pinned mode uses dedicated pane)
