@@ -187,11 +187,7 @@ fn compact_usage_height(data: &InfoWidgetData) -> u16 {
 
 fn compact_kv_cache_height(data: &InfoWidgetData) -> u16 {
     if data.cache_hit_info.is_some() {
-        2 + u16::from(
-            data.usage_info
-                .as_ref()
-                .is_some_and(|usage| usage.available),
-        )
+        2 + u16::from(data.session_token_totals.is_some())
     } else {
         0
     }

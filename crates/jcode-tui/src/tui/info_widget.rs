@@ -623,6 +623,8 @@ pub struct InfoWidgetData {
     pub background_info: Option<BackgroundInfo>,
     /// Subscription usage info
     pub usage_info: Option<UsageInfo>,
+    /// Total input/output tokens accumulated by the current session.
+    pub session_token_totals: Option<(u64, u64)>,
     /// Show consumed rather than remaining percentages in usage limits.
     pub usage_display_used: bool,
     /// Streaming output tokens per second (approximate)
@@ -1217,11 +1219,7 @@ pub(crate) fn calculate_widget_height(
                 let visible = cache.miss_attributions.len().min(5) as u16;
                 2 + visible + u16::from(cache.miss_attributions.len() > 5)
             };
-            let session_token_line = u16::from(
-                data.usage_info
-                    .as_ref()
-                    .is_some_and(|usage| usage.available),
-            );
+            let session_token_line = u16::from(data.session_token_totals.is_some());
             2 + session_token_line + attribution_lines
         }
         WidgetKind::ModelInfo => {
@@ -1688,8 +1686,11 @@ fn render_kv_cache_widget(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'stat
         render_kv_cache_summary_line(cache),
         render_cache_read_summary_line(cache),
     ];
-    if let Some(usage) = data.usage_info.as_ref().filter(|usage| usage.available) {
-        lines.push(render_session_token_summary_line(usage));
+    if let Some((input_tokens, output_tokens)) = data.session_token_totals {
+        lines.push(render_session_token_summary_line(
+            input_tokens,
+            output_tokens,
+        ));
     }
 
     lines.push(Line::from(vec![Span::styled(
@@ -1813,17 +1814,17 @@ fn render_cache_read_summary_line(cache: &CacheHitInfo) -> Line<'static> {
     ])
 }
 
-fn render_session_token_summary_line(usage: &UsageInfo) -> Line<'static> {
+fn render_session_token_summary_line(input_tokens: u64, output_tokens: u64) -> Line<'static> {
     Line::from(vec![
         Span::styled("In: ", Style::default().fg(rgb(140, 140, 150))),
         Span::styled(
-            compact_token_count(usage.input_tokens),
+            compact_token_count(input_tokens),
             Style::default().fg(rgb(180, 180, 190)),
         ),
         Span::styled(" / ", Style::default().fg(rgb(80, 80, 90))),
         Span::styled("Out: ", Style::default().fg(rgb(140, 140, 150))),
         Span::styled(
-            compact_token_count(usage.output_tokens),
+            compact_token_count(output_tokens),
             Style::default().fg(rgb(180, 180, 190)),
         ),
     ])
@@ -2129,8 +2130,11 @@ fn render_sections(
     if let Some(cache) = data.cache_hit_info.as_ref() {
         lines.push(render_kv_cache_summary_line(cache));
         lines.push(render_cache_read_summary_line(cache));
-        if let Some(usage) = data.usage_info.as_ref().filter(|usage| usage.available) {
-            lines.push(render_session_token_summary_line(usage));
+        if let Some((input_tokens, output_tokens)) = data.session_token_totals {
+            lines.push(render_session_token_summary_line(
+                input_tokens,
+                output_tokens,
+            ));
         }
     }
 

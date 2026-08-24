@@ -121,11 +121,11 @@ fn overview_cache_summary_includes_cache_read_tokens() {
     let data = InfoWidgetData {
         model: Some("deepseek-v4-pro".to_string()),
         usage_info: Some(UsageInfo {
-            input_tokens: 12_000,
-            output_tokens: 3_000,
+            provider: UsageProvider::Anthropic,
             available: true,
             ..Default::default()
         }),
+        session_token_totals: Some((12_000, 3_000)),
         cache_hit_info: Some(CacheHitInfo {
             reported_input_tokens: 20_000,
             read_tokens: 15_000,
@@ -168,11 +168,11 @@ fn overview_cache_summary_includes_cache_read_tokens() {
 fn kv_cache_widget_shows_session_token_totals_below_cache_summary() {
     let data = InfoWidgetData {
         usage_info: Some(UsageInfo {
-            input_tokens: 12_000,
-            output_tokens: 3_000,
+            provider: UsageProvider::Anthropic,
             available: true,
             ..Default::default()
         }),
+        session_token_totals: Some((12_000, 3_000)),
         cache_hit_info: Some(CacheHitInfo {
             reported_input_tokens: 20_000,
             read_tokens: 15_000,
@@ -1886,6 +1886,7 @@ fn compact_page_height_estimate_matches_rendered_lines() {
             available: true,
             ..Default::default()
         }),
+        session_token_totals: Some((12_000, 3_000)),
         cache_hit_info: Some(CacheHitInfo {
             reported_input_tokens: 1_000,
             read_tokens: 800,

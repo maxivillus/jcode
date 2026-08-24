@@ -107,6 +107,7 @@ fn contended_data() -> InfoWidgetData {
             available: true,
             ..Default::default()
         }),
+        session_token_totals: Some((12_000, 3_000)),
         cache_hit_info: Some(CacheHitInfo {
             reported_input_tokens: 2_000,
             read_tokens: 1_500,
@@ -431,11 +432,10 @@ fn anchored_overview_rehomes_when_cache_summary_grows_it() {
             ..Default::default()
         }),
         usage_info: Some(UsageInfo {
-            input_tokens: 12_000,
-            output_tokens: 3_000,
             available: true,
             ..Default::default()
         }),
+        session_token_totals: Some((12_000, 3_000)),
         ..base
     };
     let next = calculate_placements_anchored(area, &margins, &expanded, true, &initial.anchors);

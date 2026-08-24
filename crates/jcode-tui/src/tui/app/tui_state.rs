@@ -350,6 +350,15 @@ impl App {
         }
     }
 
+    fn display_session_token_totals(&self) -> Option<(u64, u64)> {
+        let (history_input, history_output) = self.remote_total_tokens.unwrap_or_default();
+        let input_tokens = history_input.saturating_add(self.token_accounting.total_input_tokens);
+        let output_tokens =
+            history_output.saturating_add(self.token_accounting.total_output_tokens);
+
+        (input_tokens > 0 || output_tokens > 0).then_some((input_tokens, output_tokens))
+    }
+
     fn widget_usage_info(
         &self,
         route: WidgetRouteInfo,
@@ -361,22 +370,8 @@ impl App {
             None
         };
 
-        // On a resumed session, `token_accounting.total_*` is reset to 0 and the
-        // prior usage lives in `remote_total_tokens` (restored from history). Add
-        // them so the widget's "in + out" reflects the whole session, mirroring
-        // the `/cache` stats path, rather than only tokens seen since resume.
         let (display_input_tokens, display_output_tokens) =
-            if let Some((hist_in, hist_out)) = self.remote_total_tokens {
-                (
-                    hist_in.saturating_add(self.token_accounting.total_input_tokens),
-                    hist_out.saturating_add(self.token_accounting.total_output_tokens),
-                )
-            } else {
-                (
-                    self.token_accounting.total_input_tokens,
-                    self.token_accounting.total_output_tokens,
-                )
-            };
+            self.display_session_token_totals().unwrap_or_default();
 
         let cost_based_usage = || crate::tui::info_widget::UsageInfo {
             provider: crate::tui::info_widget::UsageProvider::CostBased,
@@ -829,9 +824,7 @@ impl crate::tui::TuiState for App {
     }
 
     fn total_session_tokens(&self) -> Option<(u64, u64)> {
-        // In remote mode, use tokens from server
-        // Independent mode doesn't currently track total tokens
-        self.remote_total_tokens
+        self.display_session_token_totals()
     }
 
     fn session_compaction_count(&self) -> usize {
@@ -1500,6 +1493,7 @@ impl crate::tui::TuiState for App {
         let route = self.widget_route_info(model.as_deref());
         let auth_method = self.widget_auth_method(route);
         let usage_info = self.widget_usage_info(route, auth_method);
+        let session_token_totals = self.display_session_token_totals();
 
         let tokens_per_second = if matches!(self.status, ProcessingStatus::Streaming) {
             self.compute_streaming_tps()
@@ -1612,6 +1606,7 @@ impl crate::tui::TuiState for App {
             swarm_info,
             background_info,
             usage_info,
+            session_token_totals,
             usage_display_used: crate::config::config().display.usage_display_used(),
             tokens_per_second,
             provider_name: if uses_remote_widget_metadata {

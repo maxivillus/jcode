@@ -139,10 +139,11 @@ fn test_remote_error_with_retryable_pending_schedules_retry() {
         .expect("retry should surface a connection status message");
     assert_eq!(retry_notice.role, "system");
     assert!(retry_notice.content.contains("Connection lost - retrying"));
-    assert!(retry_notice.content.contains(&format!(
-        "attempt 1/{}",
-        App::AUTO_RETRY_MAX_ATTEMPTS
-    )));
+    assert!(
+        retry_notice
+            .content
+            .contains(&format!("attempt 1/{}", App::AUTO_RETRY_MAX_ATTEMPTS))
+    );
     assert!(retry_notice.content.contains("Remote request failed"));
 }
 
@@ -1212,10 +1213,7 @@ fn test_tui_grok_build_login_starts_managed_oauth_flow() {
 
     app.start_login_provider(crate::provider_catalog::GROK_BUILD_LOGIN_PROVIDER);
 
-    assert!(matches!(
-        app.pending_login,
-        Some(PendingLogin::GrokBuild)
-    ));
+    assert!(matches!(app.pending_login, Some(PendingLogin::GrokBuild)));
     let rendered = app
         .display_messages()
         .iter()
@@ -1302,8 +1300,9 @@ fn test_info_widget_remote_opencode_shows_cost_based_usage() {
     app.is_remote = true;
     app.remote_provider_name = Some("opencode".to_string());
     app.remote_provider_model = Some("qwen3-coder".to_string());
-    app.token_accounting.total_input_tokens = 12_000;
-    app.token_accounting.total_output_tokens = 3_400;
+    app.remote_total_tokens = Some((10_000, 2_000));
+    app.token_accounting.total_input_tokens = 2_000;
+    app.token_accounting.total_output_tokens = 1_400;
 
     let data = crate::tui::TuiState::info_widget_data(&app);
 
@@ -1316,6 +1315,7 @@ fn test_info_widget_remote_opencode_shows_cost_based_usage() {
     assert!(usage.available);
     assert_eq!(usage.input_tokens, 12_000);
     assert_eq!(usage.output_tokens, 3_400);
+    assert_eq!(data.session_token_totals, Some((12_000, 3_400)));
 }
 
 #[test]
@@ -1348,6 +1348,7 @@ fn test_info_widget_remote_anthropic_api_key_shows_cost_based_usage() {
     );
     assert_eq!(usage.input_tokens, 12_000);
     assert_eq!(usage.output_tokens, 3_400);
+    assert_eq!(data.session_token_totals, Some((12_000, 3_400)));
 
     // OAuth subscription keeps subscription bars; the server now reports the
     // resolved credential directly, so the widget reflects AnthropicOAuth.
@@ -1361,6 +1362,7 @@ fn test_info_widget_remote_anthropic_api_key_shows_cost_based_usage() {
         data.usage_info.as_ref().map(|info| info.provider),
         Some(crate::tui::info_widget::UsageProvider::Anthropic)
     );
+    assert_eq!(data.session_token_totals, Some((12_000, 3_400)));
 }
 
 #[test]
@@ -1385,6 +1387,7 @@ fn test_info_widget_remote_openai_billing_follows_resolved_credential() {
     );
     assert_eq!(usage.input_tokens, 12_000);
     assert_eq!(usage.output_tokens, 3_400);
+    assert_eq!(data.session_token_totals, Some((12_000, 3_400)));
 
     app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
     let data = crate::tui::TuiState::info_widget_data(&app);
@@ -1396,6 +1399,7 @@ fn test_info_widget_remote_openai_billing_follows_resolved_credential() {
         data.usage_info.as_ref().map(|usage| usage.provider),
         Some(crate::tui::info_widget::UsageProvider::OpenAI)
     );
+    assert_eq!(data.session_token_totals, Some((12_000, 3_400)));
 
     app.remote_resolved_credential = None;
     app.session.route_api_method = None;
@@ -1941,7 +1945,9 @@ fn test_debug_command_side_panel_latency_bench_reports_immediate_redraw() {
     // against 16.0ms purely from machine load, while passing in isolation. The
     // behavioral assertions above are the real subject, so gate only the timing
     // (refs #592).
-    let p95 = value["summary"]["latency_ms"]["p95"].as_f64().unwrap_or(0.0);
+    let p95 = value["summary"]["latency_ms"]["p95"]
+        .as_f64()
+        .unwrap_or(0.0);
     assert_perf_budget(p95 < 16.0, || {
         format!("side-panel p95 should stay within a 60fps frame budget: {result}")
     });
@@ -2228,7 +2234,10 @@ fn test_externally_started_turn_adopts_processing_state_and_settles_on_done() {
         app.status
     );
 
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
     app.handle_server_event(crate::protocol::ServerEvent::Done { id: 0 }, &mut remote);
 
     // Streaming text is revealed at a paced rate, so a `Done` that arrives with
