@@ -3,7 +3,7 @@ use super::{
     Margins, MemoryActivity, MemoryEvent, MemoryEventKind, MemoryInfo, MemoryState, PipelineState,
     StepStatus, SwarmInfo, UsageInfo, UsageProvider, WidgetKind, calculate_placements,
     calculate_widget_height, effective_prompt_tokens, occasional_status_tip,
-    render_kv_cache_summary_line, render_kv_cache_widget, render_memory_compact,
+    render_cache_read_summary_line, render_kv_cache_summary_line, render_kv_cache_widget,
     render_memory_widget, render_model_widget, render_sections, render_todos_compact,
     render_todos_expanded, render_todos_widget, render_usage_compact, render_usage_widget,
     swarm_plan_todos, truncate_smart,
@@ -80,12 +80,26 @@ fn kv_cache_widget_shows_session_hit_ratio() {
     assert!(data.has_data_for(WidgetKind::KvCache));
     assert_eq!(
         calculate_widget_height(WidgetKind::KvCache, &data, 40, 20),
-        6
+        7
     );
     let lines = render_kv_cache_widget(&data, Rect::new(0, 0, 40, 5));
     let text = lines_text_concat(&lines);
 
-    assert_eq!(lines.len(), 4);
+    let line_texts: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect();
+    assert_eq!(line_texts.len(), 5);
+    assert_eq!(
+        line_texts[0],
+        "KV cache: yield 90% · last 94% · session 39%"
+    );
+    assert_eq!(line_texts[1], "Cache read: 15k");
     assert!(text.contains("KV cache:"));
     assert!(text.contains("Cache read: 15k"));
     assert!(!text.contains("In:"));
@@ -142,11 +156,12 @@ fn overview_cache_summary_includes_cache_read_tokens() {
                 .collect()
         })
         .collect();
-    let cache_line = line_texts
+    let kv_line = line_texts
         .iter()
-        .position(|line| line.starts_with("Cache read:"))
-        .expect("cache summary line should be rendered");
-    assert_eq!(line_texts[cache_line + 1], "In: 12k / Out: 3k");
+        .position(|line| line.starts_with("KV cache:"))
+        .expect("KV cache summary line should be rendered");
+    assert_eq!(line_texts[kv_line + 1], "Cache read: 15k");
+    assert_eq!(line_texts[kv_line + 2], "In: 12k / Out: 3k");
 }
 
 #[test]
@@ -169,19 +184,19 @@ fn kv_cache_widget_shows_session_token_totals_below_cache_summary() {
 
     assert_eq!(
         calculate_widget_height(WidgetKind::KvCache, &data, 40, 20),
-        6
+        7
     );
     let lines = render_kv_cache_widget(&data, Rect::new(0, 0, 40, 5));
     let text = lines_text_concat(&lines);
 
-    assert_eq!(lines.len(), 4);
+    assert_eq!(lines.len(), 5);
     assert!(text.contains("Cache read: 15k"));
     assert!(text.contains("In: 12k / Out: 3k"));
-    assert_eq!(lines[1].spans[0].content, "In: ");
+    assert_eq!(lines[2].spans[0].content, "In: ");
 }
 
 #[test]
-fn overview_cache_summary_starts_with_cache_read_for_narrow_widgets() {
+fn overview_cache_summary_starts_with_kv_cache_for_narrow_widgets() {
     let cache = CacheHitInfo {
         reported_input_tokens: 20_000,
         read_tokens: 15_000,
@@ -196,7 +211,15 @@ fn overview_cache_summary_starts_with_cache_read_for_narrow_widgets() {
         .map(|span| span.content.as_ref())
         .collect();
 
-    assert!(text.starts_with("Cache read: 15k"));
+    assert!(text.starts_with("KV cache: "));
+
+    let cache_read = render_cache_read_summary_line(&cache);
+    let cache_read_text: String = cache_read
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert_eq!(cache_read_text, "Cache read: 15k");
 }
 
 #[test]

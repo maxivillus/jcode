@@ -1222,7 +1222,7 @@ pub(crate) fn calculate_widget_height(
                     .as_ref()
                     .is_some_and(|usage| usage.available),
             );
-            1 + session_token_line + attribution_lines
+            2 + session_token_line + attribution_lines
         }
         WidgetKind::ModelInfo => {
             if data.model.is_none() {
@@ -1684,7 +1684,10 @@ fn render_kv_cache_widget(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'stat
     let Some(cache) = data.cache_hit_info.as_ref() else {
         return Vec::new();
     };
-    let mut lines = vec![render_kv_cache_summary_line(cache)];
+    let mut lines = vec![
+        render_kv_cache_summary_line(cache),
+        render_cache_read_summary_line(cache),
+    ];
     if let Some(usage) = data.usage_info.as_ref().filter(|usage| usage.available) {
         lines.push(render_session_token_summary_line(usage));
     }
@@ -1754,15 +1757,10 @@ fn render_kv_cache_summary_line(cache: &CacheHitInfo) -> Line<'static> {
         .unwrap_or(lifetime_pct);
     let color = kv_cache_optimal_color(health_pct);
 
-    let mut spans = vec![
-        Span::styled("Cache read: ", Style::default().fg(rgb(140, 140, 150))),
-        Span::styled(
-            compact_token_count(cache.read_tokens),
-            Style::default().fg(rgb(180, 180, 190)),
-        ),
-        Span::styled(" · ", Style::default().fg(rgb(80, 80, 90))),
-        Span::styled("KV cache: ", Style::default().fg(rgb(180, 180, 190)).bold()),
-    ];
+    let mut spans = vec![Span::styled(
+        "KV cache: ",
+        Style::default().fg(rgb(180, 180, 190)).bold(),
+    )];
 
     if let Some(warm_pct) = warm_pct {
         spans.push(Span::styled(
@@ -1803,6 +1801,16 @@ fn render_kv_cache_summary_line(cache: &CacheHitInfo) -> Line<'static> {
     ));
 
     Line::from(spans)
+}
+
+fn render_cache_read_summary_line(cache: &CacheHitInfo) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("Cache read: ", Style::default().fg(rgb(140, 140, 150))),
+        Span::styled(
+            compact_token_count(cache.read_tokens),
+            Style::default().fg(rgb(180, 180, 190)),
+        ),
+    ])
 }
 
 fn render_session_token_summary_line(usage: &UsageInfo) -> Line<'static> {
@@ -2120,6 +2128,7 @@ fn render_sections(
 
     if let Some(cache) = data.cache_hit_info.as_ref() {
         lines.push(render_kv_cache_summary_line(cache));
+        lines.push(render_cache_read_summary_line(cache));
         if let Some(usage) = data.usage_info.as_ref().filter(|usage| usage.available) {
             lines.push(render_session_token_summary_line(usage));
         }
