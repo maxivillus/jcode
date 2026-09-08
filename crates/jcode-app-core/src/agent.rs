@@ -244,6 +244,8 @@ pub struct Agent {
     /// AGENTS.md is session bootstrap input. Keep the captured text stable so
     /// tool writes do not mutate the provider's cacheable prefix mid-session.
     agents_md_snapshot: (Option<String>, crate::prompt::ContextInfo),
+    /// Хеш последнего static prompt, связанный с provider session.
+    last_provider_static_prompt_hash: Option<String>,
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
     /// One-step undo snapshot captured before the most recent rewind.
@@ -326,6 +328,7 @@ impl Agent {
             mcp_late_register_resolved: false,
             system_prompt_override: None,
             agents_md_snapshot,
+            last_provider_static_prompt_hash: None,
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
             stdin_request_tx: None,
@@ -585,6 +588,21 @@ impl Agent {
         }
     }
 
+    pub(super) fn invalidate_provider_context(&mut self, reason: &str) -> bool {
+        let had_provider_session =
+            self.provider_session_id.is_some() || self.session.provider_session_id.is_some();
+
+        self.provider_session_id = None;
+        self.session.provider_session_id = None;
+        self.cache_tracker.reset();
+
+        if had_provider_session {
+            self.persist_session_best_effort(reason);
+        }
+
+        had_provider_session
+    }
+
     fn reset_runtime_state_for_session_change(&mut self) {
         self.active_skill = None;
         self.last_upstream_provider = None;
@@ -603,6 +621,7 @@ impl Agent {
         self.locked_tools = None;
         self.context_controller = ContextController::default();
         self.mcp_late_register_resolved = false;
+        self.last_provider_static_prompt_hash = None;
         self.rewind_undo_snapshot = None;
     }
 
@@ -902,10 +921,13 @@ impl Agent {
         self.tool_output_scan_index = self.session.messages.len();
 
         if repaired > 0 {
-            self.persist_session_best_effort("missing tool-output repair");
-            self.cache_tracker.reset();
             self.locked_tools = None;
             self.mcp_late_register_resolved = false;
+            let had_provider_session =
+                self.invalidate_provider_context("missing tool-output repair");
+            if !had_provider_session {
+                self.persist_session_best_effort("missing tool-output repair");
+            }
         }
 
         repaired
@@ -924,7 +946,11 @@ impl Agent {
     pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {
         if working_dir.is_some() {
             self.session.working_dir = working_dir;
+            self.refresh_agents_md_snapshot();
             self.session.refresh_initial_session_context_message();
+            self.locked_tools = None;
+            self.mcp_late_register_resolved = false;
+            self.invalidate_provider_context("pending working directory changed");
         }
     }
 

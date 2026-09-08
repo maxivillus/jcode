@@ -261,6 +261,9 @@ impl Agent {
         self.session.working_dir = Some(dir.to_string());
         self.refresh_agents_md_snapshot();
         self.session.refresh_initial_session_context_message();
+        self.locked_tools = None;
+        self.mcp_late_register_resolved = false;
+        self.invalidate_provider_context("working directory changed");
         self.log_env_snapshot("working_dir");
     }
 

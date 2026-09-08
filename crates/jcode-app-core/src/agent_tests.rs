@@ -643,6 +643,137 @@ async fn messages_for_provider_applies_manual_compaction_in_native_auto_mode() {
     }
 }
 
+#[tokio::test]
+async fn static_prompt_change_invalidates_resumable_provider_session() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let initial = agent.build_system_prompt_split(None);
+    let first_plan = agent.prepare_context_preflight(&[], &[], &initial);
+    assert_eq!(first_plan.revision.0, 1);
+    agent.provider_session_id = Some("current-provider-session".to_string());
+    agent.session.provider_session_id = Some("current-provider-session".to_string());
+    let same_plan = agent.prepare_context_preflight(&[], &[], &initial);
+    assert_eq!(same_plan.revision.0, 1);
+    assert_eq!(
+        agent.provider_session_id.as_deref(),
+        Some("current-provider-session")
+    );
+
+    agent.set_system_prompt("new static prompt");
+    agent.provider_session_id = Some("old-provider-session".to_string());
+    agent.session.provider_session_id = Some("old-provider-session".to_string());
+
+    let changed = agent.build_system_prompt_split(None);
+    let second_plan = agent.prepare_context_preflight(&[], &[], &changed);
+
+    assert_eq!(changed.static_part, "new static prompt");
+    assert_eq!(second_plan.revision.0, 2);
+    assert!(agent.provider_session_id.is_none());
+    assert!(agent.session.provider_session_id.is_none());
+}
+
+#[tokio::test]
+async fn restored_provider_session_without_prompt_binding_is_not_resumed() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    agent.provider_session_id = Some("restored-provider-session".to_string());
+    agent.session.provider_session_id = Some("restored-provider-session".to_string());
+    let prompt = agent.build_system_prompt_split(None);
+
+    let _ = agent.prepare_context_preflight(&[], &[], &prompt);
+
+    assert!(agent.provider_session_id.is_none());
+    assert!(agent.session.provider_session_id.is_none());
+}
+
+#[tokio::test]
+async fn agents_refresh_before_preflight_invalidates_old_provider_session() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let old_marker = "old-agents-marker-for-context-refresh";
+    let new_marker = "new-agents-marker-for-context-refresh";
+    std::fs::write(
+        temp_dir.path().join("AGENTS.md"),
+        format!("old rules: {old_marker}\n"),
+    )
+    .expect("write old AGENTS.md");
+
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let working_dir = temp_dir.path().to_str().expect("working dir");
+    let mut agent = Agent::new_with_initial_working_dir(provider, registry, Some(working_dir));
+
+    let initial = agent.build_system_prompt_split(None);
+    let _ = agent.prepare_context_preflight(&[], &[], &initial);
+    agent.provider_session_id = Some("old-provider-session".to_string());
+    agent.session.provider_session_id = Some("old-provider-session".to_string());
+
+    std::fs::write(
+        temp_dir.path().join("AGENTS.md"),
+        format!("new rules: {new_marker}\n"),
+    )
+    .expect("write new AGENTS.md");
+    agent.refresh_agents_md_snapshot();
+
+    let changed = agent.build_system_prompt_split(None);
+    let _ = agent.prepare_context_preflight(&[], &[], &changed);
+
+    assert!(changed.static_part.contains(new_marker));
+    assert!(!changed.static_part.contains(old_marker));
+    assert!(agent.provider_session_id.is_none());
+    assert!(agent.session.provider_session_id.is_none());
+    let agents_text = agent
+        .agents_md_snapshot
+        .0
+        .clone()
+        .expect("AGENTS.md snapshot");
+    assert_eq!(
+        agent.context_manifest().components.agents,
+        Some(crate::context::sha256_hex(agents_text))
+    );
+}
+
+#[tokio::test]
+async fn unlocking_tools_invalidates_resumable_provider_session() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    agent.locked_tools = Some(Vec::new());
+    agent.provider_session_id = Some("old-provider-session".to_string());
+    agent.session.provider_session_id = Some("old-provider-session".to_string());
+
+    agent.unlock_tools();
+
+    assert!(agent.locked_tools.is_none());
+    assert!(agent.provider_session_id.is_none());
+    assert!(agent.session.provider_session_id.is_none());
+}
+
+#[tokio::test]
+async fn working_directory_change_invalidates_resumable_provider_session() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    agent.provider_session_id = Some("old-provider-session".to_string());
+    agent.session.provider_session_id = Some("old-provider-session".to_string());
+    agent.set_working_dir(temp_dir.path().to_str().expect("working dir"));
+
+    assert_eq!(agent.working_dir(), temp_dir.path().to_str());
+    assert!(agent.provider_session_id.is_none());
+    assert!(agent.session.provider_session_id.is_none());
+}
+
 // ── InterruptSignal tests ────────────────────────────────────────────────
 
 #[tokio::test]

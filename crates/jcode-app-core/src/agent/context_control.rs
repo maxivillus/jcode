@@ -91,17 +91,37 @@ fn message_token_estimate(messages: &[Message]) -> usize {
 }
 
 impl Agent {
+    fn refresh_static_prompt_binding(&mut self, static_part: &str) {
+        let current_hash = sha256_hex(static_part.as_bytes());
+        let has_provider_session =
+            self.provider_session_id.is_some() || self.session.provider_session_id.is_some();
+        let changed = self
+            .last_provider_static_prompt_hash
+            .as_deref()
+            .is_some_and(|previous| previous != current_hash);
+        let restored_without_binding =
+            has_provider_session && self.last_provider_static_prompt_hash.is_none();
+
+        if changed || restored_without_binding {
+            self.invalidate_provider_context("static system prompt changed");
+        }
+
+        self.last_provider_static_prompt_hash = Some(current_hash);
+    }
+
     /// Снимает provider-facing snapshot перед запросом.
     ///
-    /// Здесь не меняются Session, transcript или provider state. Controller
-    /// обновляет только свою локальную revision и запоминает estimate. Если
-    /// registry отсутствует или повреждён, текущий transcript flow сохраняется.
+    /// Здесь проверяется привязка static prompt к provider session. При
+    /// рассогласовании старая resumable session сбрасывается. Controller
+    /// обновляет локальную revision и запоминает estimate. Если registry
+    /// отсутствует или повреждён, текущий transcript flow сохраняется.
     pub(super) fn prepare_context_preflight(
         &mut self,
         messages: &[Message],
         tools: &[ToolDefinition],
         split_prompt: &SplitSystemPrompt,
     ) -> ContextPreflightPlan {
+        self.refresh_static_prompt_binding(&split_prompt.static_part);
         let system_prompt = if split_prompt.dynamic_part.is_empty() {
             split_prompt.static_part.clone()
         } else {
@@ -121,6 +141,7 @@ impl Agent {
         };
         let components = ContextComponentHashes {
             system_prompt: Some(sha256_hex(system_prompt.as_bytes())),
+            agents: self.agents_md_snapshot.0.as_deref().map(sha256_hex),
             skills: skill_runtime_fingerprint,
             tools: Some(serialized_fingerprint(tools)),
             messages: Some(serialized_fingerprint(messages)),

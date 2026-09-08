@@ -219,9 +219,10 @@ impl Agent {
 
     /// Clear provider session so the next turn sends full context.
     pub fn reset_provider_session(&mut self) {
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
-        self.persist_session_best_effort("provider session reset");
+        let had_provider_session = self.invalidate_provider_context("provider session reset");
+        if !had_provider_session {
+            self.persist_session_best_effort("provider session reset");
+        }
     }
 
     /// Rewind the conversation to a 1-based visible transcript message index.
@@ -288,7 +289,7 @@ impl Agent {
         if self.locked_tools.is_some() {
             logging::info("Tool list unlocked — next request will pick up current tools");
             self.locked_tools = None;
-            self.cache_tracker.reset();
+            self.invalidate_provider_context("tool list unlocked");
         }
         // Allow the late-MCP-registration recheck to fire once for the next
         // snapshot (e.g. after an explicit `mcp` reload).
@@ -322,7 +323,10 @@ impl Agent {
     /// Set a custom system prompt override (used by ambient mode).
     /// When set, this replaces the normal system prompt entirely.
     pub fn set_system_prompt(&mut self, prompt: &str) {
-        self.system_prompt_override = Some(prompt.to_string());
+        if self.system_prompt_override.as_deref() != Some(prompt) {
+            self.system_prompt_override = Some(prompt.to_string());
+            self.invalidate_provider_context("system prompt override changed");
+        }
     }
 
     pub fn set_debug(&mut self, is_debug: bool) {
@@ -435,7 +439,7 @@ impl Agent {
                 // the recheck fire again on every later turn.
                 self.mcp_late_register_resolved = true;
                 self.locked_tools = None;
-                self.cache_tracker.reset();
+                self.invalidate_provider_context("late MCP tool registration");
             } else {
                 // No MCP tools have appeared. They may still be connecting, so
                 // leave the guard unset and re-check on the next turn. Once they
