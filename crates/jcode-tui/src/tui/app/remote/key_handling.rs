@@ -1078,6 +1078,30 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
+                if trimmed == "/context refresh" {
+                    app.remote_context_status = None;
+                    app.pending_remote_context_status_request = None;
+                    app.push_display_message(DisplayMessage::system(
+                        "Запрашиваю свежий status удалённого context...".to_string(),
+                    ));
+                    match remote.request_state().await {
+                        Ok(request_id) => {
+                            app.pending_remote_context_status_request = Some(request_id);
+                            app.set_status_notice("Запрашиваю свежий status удалённого context...");
+                        }
+                        Err(error) => {
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Не удалось обновить status удалённого context: {}",
+                                error
+                            )));
+                            app.set_status_notice(
+                                "Обновление status удалённого context не выполнено",
+                            );
+                        }
+                    }
+                    return Ok(());
+                }
+
                 if trimmed == "/context compact" {
                     app.push_display_message(DisplayMessage::system(
                         "Запрашиваю compact удалённого context...".to_string(),

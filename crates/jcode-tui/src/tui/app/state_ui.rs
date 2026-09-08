@@ -1944,6 +1944,15 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
 
     if let Some(command) = parse_context_command(trimmed) {
         match command {
+            ContextCommand::Refresh => {
+                app.refresh_context_snapshot();
+                app.push_display_message(DisplayMessage::system(
+                    "Локальный context preview обновлён. Transcript и provider context не удалялись. Перед следующим provider request Agent снова проверит system prompt, AGENTS snapshot, skill runtime registry, tools и messages."
+                        .to_string(),
+                ));
+                app.set_status_notice("Context refreshed");
+                return true;
+            }
             ContextCommand::Compact => {
                 super::commands::handle_config_command(app, "/compact");
                 return true;
@@ -2019,7 +2028,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             }
             ContextCommand::Invalid => {
                 app.push_display_message(DisplayMessage::error(
-                    "Использование: /context, /context status, /context preview, /context compact, /context reset-provider, /context export [path], /context snapshot [path]".to_string(),
+                    "Использование: /context, /context status, /context preview, /context refresh, /context compact, /context reset-provider, /context export [path], /context snapshot [path]".to_string(),
                 ));
                 return true;
             }
@@ -2335,6 +2344,7 @@ pub(super) fn format_remote_context_status(
 enum ContextCommand {
     Report,
     Preview,
+    Refresh,
     Compact,
     ResetProvider,
     Snapshot(Option<PathBuf>),
@@ -2357,6 +2367,7 @@ fn parse_context_command(trimmed: &str) -> Option<ContextCommand> {
     match action {
         "status" if path.is_none() => Some(ContextCommand::Report),
         "preview" if path.is_none() => Some(ContextCommand::Preview),
+        "refresh" if path.is_none() => Some(ContextCommand::Refresh),
         "compact" if path.is_none() => Some(ContextCommand::Compact),
         "reset-provider" if path.is_none() => Some(ContextCommand::ResetProvider),
         "snapshot" | "save" => Some(ContextCommand::Snapshot(path.map(PathBuf::from))),
@@ -2678,6 +2689,18 @@ mod context_command_tests {
         );
         assert_eq!(
             parse_context_command("/context reset-provider now"),
+            Some(ContextCommand::Invalid)
+        );
+    }
+
+    #[test]
+    fn parses_refresh_without_extra_arguments() {
+        assert_eq!(
+            parse_context_command("/context refresh"),
+            Some(ContextCommand::Refresh)
+        );
+        assert_eq!(
+            parse_context_command("/context refresh now"),
             Some(ContextCommand::Invalid)
         );
     }
