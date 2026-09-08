@@ -1177,6 +1177,10 @@ pub struct App {
     remote_total_tokens: Option<(u64, u64)>,
     // Detailed persisted token/cache usage totals (from server in remote mode)
     remote_token_usage_totals: Option<crate::protocol::TokenUsageTotals>,
+    // Последний ответ сервера с агрегированными данными provider context.
+    remote_context_status: Option<crate::protocol::ContextStatusSnapshot>,
+    // Request ID текущего запроса свежего provider context status.
+    pending_remote_context_status_request: Option<u64>,
     // Whether the remote session is canary/self-dev (from server)
     remote_is_canary: Option<bool>,
     // Remote server version (from server)

@@ -249,6 +249,44 @@ fn test_event_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_state_context_status_roundtrip_and_legacy_decode() -> Result<()> {
+    let event = ServerEvent::State {
+        id: 13,
+        session_id: "sess_13".to_string(),
+        message_count: 4,
+        is_processing: false,
+        context_status: Some(ContextStatusSnapshot {
+            schema_version: 1,
+            revision: 8,
+            provider_generation: 3,
+            estimated_input_tokens: 512,
+            observed_input_tokens: Some(480),
+            fingerprint: "abc123".to_string(),
+        }),
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"context_status\""));
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::State {
+        id, context_status, ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong event type"));
+    };
+    assert_eq!(id, 13);
+    assert_eq!(context_status.unwrap().estimated_input_tokens, 512);
+
+    let legacy =
+        r#"{"type":"state","id":14,"session_id":"legacy","message_count":0,"is_processing":false}"#;
+    let decoded = parse_event_json(legacy)?;
+    let ServerEvent::State { context_status, .. } = decoded else {
+        return Err(anyhow!("wrong legacy event type"));
+    };
+    assert!(context_status.is_none());
+    Ok(())
+}
+
+#[test]
 fn test_context_message_added_event_roundtrip() -> Result<()> {
     let event = ServerEvent::ContextMessageAdded { id: 42 };
     let json = encode_event(&event);

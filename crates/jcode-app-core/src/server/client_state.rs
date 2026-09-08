@@ -4,7 +4,8 @@ use crate::agent::Agent;
 use crate::bus::Bus;
 use crate::message::{ContentBlock, Role};
 use crate::protocol::{
-    HistoryMessage, ServerEvent, SessionActivitySnapshot, TokenUsageTotals, encode_event,
+    ContextStatusSnapshot, HistoryMessage, ServerEvent, SessionActivitySnapshot, TokenUsageTotals,
+    encode_event,
 };
 use crate::provider::Provider;
 use crate::session::{Session, SessionStatus};
@@ -78,6 +79,7 @@ pub(super) async fn handle_get_state(
     id: u64,
     client_session_id: &str,
     client_is_processing: bool,
+    agent: &Arc<Mutex<Agent>>,
     sessions: &SessionAgents,
     writer: &Arc<Mutex<WriteHalf>>,
 ) -> Result<()> {
@@ -86,6 +88,18 @@ pub(super) async fn handle_get_state(
         sessions_guard.len()
     };
 
+    let context_status = agent.try_lock().ok().map(|agent_guard| {
+        let manifest = agent_guard.context_manifest();
+        ContextStatusSnapshot {
+            schema_version: manifest.schema_version,
+            revision: manifest.revision.0,
+            provider_generation: manifest.provider_generation,
+            estimated_input_tokens: manifest.estimated_input_tokens,
+            observed_input_tokens: manifest.observed_input_tokens,
+            fingerprint: manifest.fingerprint(),
+        }
+    });
+
     write_event(
         writer,
         &ServerEvent::State {
@@ -93,6 +107,7 @@ pub(super) async fn handle_get_state(
             session_id: client_session_id.to_string(),
             message_count: session_count,
             is_processing: client_is_processing,
+            context_status,
         },
     )
     .await

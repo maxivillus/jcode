@@ -1403,6 +1403,7 @@ pub(super) async fn handle_client(
                     id,
                     &client_session_id,
                     client_is_processing,
+                    &agent,
                     &sessions,
                     &writer,
                 )

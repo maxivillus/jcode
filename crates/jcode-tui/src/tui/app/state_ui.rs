@@ -1942,7 +1942,47 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
-    if trimmed == "/context" {
+    if let Some(command) = parse_context_command(trimmed) {
+        match command {
+            ContextCommand::Snapshot(path) => {
+                let path = path
+                    .map(Ok)
+                    .unwrap_or_else(|| default_context_snapshot_path(app));
+                let path = match path {
+                    Ok(path) => path,
+                    Err(error) => {
+                        app.push_display_message(DisplayMessage::error(error));
+                        return true;
+                    }
+                };
+                let snapshot = build_context_metadata_snapshot(app);
+                match write_new_context_snapshot(&path, &snapshot) {
+                    Ok(()) => {
+                        app.push_display_message(DisplayMessage::system(format!(
+                            "Context metadata snapshot written to:\n\n  {}",
+                            path.display()
+                        )));
+                        app.set_status_notice("Context snapshot saved");
+                    }
+                    Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                        "Failed to write context snapshot {}: {}",
+                        path.display(),
+                        error
+                    ))),
+                }
+                return true;
+            }
+            ContextCommand::Invalid => {
+                app.push_display_message(DisplayMessage::error(
+                    "Usage: /context, /context status, /context snapshot [path]".to_string(),
+                ));
+                return true;
+            }
+            ContextCommand::Report => {}
+        }
+    }
+
+    if trimmed == "/context" || trimmed == "/context status" {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
@@ -2122,6 +2162,10 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             context.estimated_tokens()
         ));
         context_report.push_str(&format!(
+            "- client context revision: {}\n- provider context limit: {}\n",
+            app.context_revision, app.context_limit
+        ));
+        context_report.push_str(&format!(
             "- prompt prefix before any user text: {} chars (~{} tokens)\n- tool definitions only: {} chars (~{} tokens)\n",
             context.prompt_prefix_chars(),
             context.prompt_prefix_tokens(),
@@ -2210,4 +2254,270 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     false
+}
+
+pub(super) fn format_remote_context_status(
+    status: Option<&crate::protocol::ContextStatusSnapshot>,
+) -> String {
+    let Some(status) = status else {
+        return "- snapshot provider: недоступен (сервер занят или не передал данные)\n"
+            .to_string();
+    };
+
+    let observed = status
+        .observed_input_tokens
+        .map(|tokens| tokens.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    let fingerprint = status.fingerprint.chars().take(16).collect::<String>();
+    let fingerprint = if fingerprint.is_empty() {
+        "none"
+    } else {
+        fingerprint.as_str()
+    };
+
+    format!(
+        "- schema: {}\n- revision: {}\n- поколение provider: {}\n- оценка входных tokens: {}\n- наблюдённые входные tokens: {}\n- prefix fingerprint: {}\n",
+        status.schema_version,
+        status.revision,
+        status.provider_generation,
+        status.estimated_input_tokens,
+        observed,
+        fingerprint,
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ContextCommand {
+    Report,
+    Snapshot(Option<PathBuf>),
+    Invalid,
+}
+
+fn parse_context_command(trimmed: &str) -> Option<ContextCommand> {
+    if trimmed == "/context" {
+        return Some(ContextCommand::Report);
+    }
+
+    let Some(arguments) = trimmed.strip_prefix("/context ") else {
+        return None;
+    };
+    let mut parts = arguments.trim().splitn(2, char::is_whitespace);
+    let action = parts.next().unwrap_or_default();
+    let path = parts.next().map(str::trim).filter(|path| !path.is_empty());
+
+    match action {
+        "status" if path.is_none() => Some(ContextCommand::Report),
+        "snapshot" | "save" => Some(ContextCommand::Snapshot(path.map(PathBuf::from))),
+        _ => Some(ContextCommand::Invalid),
+    }
+}
+
+fn default_context_snapshot_path(app: &App) -> Result<PathBuf, String> {
+    let cwd = std::env::current_dir()
+        .map_err(|error| format!("Failed to resolve current directory: {}", error))?;
+    let session_suffix = app
+        .active_client_session_id()
+        .unwrap_or("session")
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+        .take(24)
+        .collect::<String>();
+    let session_suffix = if session_suffix.is_empty() {
+        "session"
+    } else {
+        session_suffix.as_str()
+    };
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    Ok(cwd.join(format!(
+        "jcode-context-{}-{}.md",
+        timestamp_ms, session_suffix
+    )))
+}
+
+fn build_context_metadata_snapshot(app: &App) -> String {
+    let context = app.context_info();
+    let session_id = app
+        .active_client_session_id()
+        .unwrap_or(app.session.id.as_str());
+    let provider = if app.is_remote {
+        app.remote_provider_name.as_deref().unwrap_or("unknown")
+    } else {
+        app.provider.name()
+    };
+    let model = if app.is_remote {
+        app.remote_provider_model
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string())
+    } else {
+        app.provider.model()
+    };
+
+    format!(
+        "# jcode Context Snapshot\n\n\
+This is a redacted metadata snapshot. It does not contain transcript text,\n\
+prompt text, tool arguments or results, images, or credential values.\n\n\
+Generated (UTC): {}\n\
+Session id: {}\n\
+Mode: {}\n\
+Provider: {}\n\
+Model: {}\n\n\
+## Context control\n\n\
+Client context revision: {}\n\
+Provider context limit: {}\n\
+Total context characters: {}\n\
+Estimated context tokens: {}\n\n\
+## Composition counts\n\n\
+System prompt characters: {}\n\
+Session context characters: {}\n\
+Project AGENTS.md characters: {}\n\
+Global AGENTS.md characters: {}\n\
+Prompt overlay characters: {}\n\
+Skills section characters: {}\n\
+Memory section characters: {}\n\
+Preferred tools characters: {}\n\
+Tool definitions: {} characters across {} tools\n\
+User messages: {} characters across {} messages\n\
+Assistant messages: {} characters across {} messages\n\
+Tool calls: {} characters across {} calls\n\
+Tool results: {} characters across {} results\n\n\
+## Session counters\n\n\
+Input tokens recorded: {}\n\
+Output tokens recorded: {}\n\
+Queued messages: {}\n\
+Pending images: {}\n\
+Pending soft interrupts: {}\n\n\
+Snapshot policy: metadata only; use the session transcript command for the\n\
+separate persisted conversation file.\n",
+        chrono::Utc::now().to_rfc3339(),
+        session_id,
+        if app.is_remote { "remote" } else { "local" },
+        provider,
+        model,
+        app.context_revision,
+        app.context_limit,
+        context.total_chars,
+        context.estimated_tokens(),
+        context.system_prompt_chars,
+        context.session_context_chars,
+        context.project_agents_md_chars,
+        context.global_agents_md_chars,
+        context.prompt_overlay_chars,
+        context.skills_chars,
+        context.memory_chars,
+        context.preferred_tools_chars,
+        context.tool_defs_chars,
+        context.tool_defs_count,
+        context.user_messages_chars,
+        context.user_messages_count,
+        context.assistant_messages_chars,
+        context.assistant_messages_count,
+        context.tool_calls_chars,
+        context.tool_calls_count,
+        context.tool_results_chars,
+        context.tool_results_count,
+        app.token_accounting.total_input_tokens,
+        app.token_accounting.total_output_tokens,
+        app.queued_messages.len(),
+        app.pending_images.len(),
+        app.pending_soft_interrupts.len(),
+    )
+}
+
+fn write_new_context_snapshot(path: &std::path::Path, content: &str) -> Result<(), String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|error| error.to_string())?;
+    std::io::Write::write_all(&mut file, content.as_bytes()).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod context_command_tests {
+    use super::*;
+
+    #[test]
+    fn parses_context_report_and_status() {
+        assert_eq!(
+            parse_context_command("/context"),
+            Some(ContextCommand::Report)
+        );
+        assert_eq!(
+            parse_context_command("/context status"),
+            Some(ContextCommand::Report)
+        );
+    }
+
+    #[test]
+    fn parses_snapshot_with_optional_path() {
+        assert_eq!(
+            parse_context_command("/context snapshot"),
+            Some(ContextCommand::Snapshot(None))
+        );
+        assert_eq!(
+            parse_context_command("/context save notes/context.md"),
+            Some(ContextCommand::Snapshot(Some(PathBuf::from(
+                "notes/context.md"
+            ))))
+        );
+    }
+
+    #[test]
+    fn formats_remote_context_status_as_aggregate_metadata() {
+        let status = crate::protocol::ContextStatusSnapshot {
+            schema_version: 1,
+            revision: 7,
+            provider_generation: 3,
+            estimated_input_tokens: 1_024,
+            observed_input_tokens: Some(900),
+            fingerprint: "0123456789abcdefpayload-marker".to_string(),
+        };
+        let output = format_remote_context_status(Some(&status));
+
+        assert!(output.contains("revision: 7"));
+        assert!(output.contains("оценка входных tokens: 1024"));
+        assert!(output.contains("prefix fingerprint: 0123456789abcdef"));
+        assert!(!output.contains("payload-marker"));
+        assert!(format_remote_context_status(None).contains("недоступен"));
+    }
+
+    #[test]
+    fn rejects_unknown_context_subcommands() {
+        assert_eq!(
+            parse_context_command("/context delete"),
+            Some(ContextCommand::Invalid)
+        );
+        assert_eq!(parse_context_command("/contextual"), None);
+    }
+
+    #[test]
+    fn snapshot_writer_is_create_only_and_private_on_unix() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("context.md");
+
+        write_new_context_snapshot(&path, "metadata only\n").expect("write snapshot");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read snapshot"),
+            "metadata only\n"
+        );
+        assert!(write_new_context_snapshot(&path, "replace\n").is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = std::fs::metadata(&path)
+                .expect("snapshot metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
 }

@@ -933,6 +933,50 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::Pong { .. } => false,
+        ServerEvent::State {
+            id,
+            session_id,
+            context_status,
+            ..
+        } => {
+            // Ответ State связан с явным запросом `/context status`. Отложенный
+            // ответ нельзя применять после нового запроса или смены сессии.
+            if app.pending_remote_context_status_request != Some(id) {
+                crate::logging::info(&format!(
+                    "Ignoring unrelated remote context State id={} pending={:?}",
+                    id, app.pending_remote_context_status_request
+                ));
+                return false;
+            }
+            app.pending_remote_context_status_request = None;
+            let active_session_id = app
+                .remote_session_id
+                .as_deref()
+                .unwrap_or(app.session.id.as_str());
+            if session_id != active_session_id {
+                crate::logging::info(&format!(
+                    "Ignoring stale remote context State id={} session={} active_session={}",
+                    id, session_id, active_session_id
+                ));
+                return false;
+            }
+
+            app.remote_context_status = context_status;
+            let mut report = format!(
+                "Status context удалённого provider\n\nSession id: {}\n",
+                session_id
+            );
+            report.push_str(&app_mod::state_ui::format_remote_context_status(
+                app.remote_context_status.as_ref(),
+            ));
+            app.push_display_message(DisplayMessage::system(report).with_title("Status context"));
+            if app.remote_context_status.is_some() {
+                app.set_status_notice("Status удалённого context обновлён");
+            } else {
+                app.set_status_notice("Status удалённого context недоступен");
+            }
+            true
+        }
         ServerEvent::ConnectionPhase { phase } => {
             let cp = match phase.as_str() {
                 "authenticating" => crate::message::ConnectionPhase::Authenticating,
@@ -1406,6 +1450,8 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::SessionId { session_id } => {
             remote.set_session_id(session_id.clone());
             app.remote_session_id = Some(session_id.clone());
+            app.remote_context_status = None;
+            app.pending_remote_context_status_request = None;
             crate::set_current_session(&session_id);
             app.note_client_focus(true);
             app.update_terminal_title();

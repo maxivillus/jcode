@@ -28,6 +28,8 @@ pub mod client_input;
 pub mod compaction;
 pub mod config;
 pub mod console;
+pub mod context;
+pub mod context_controller;
 pub mod copilot_usage;
 pub mod dictation;
 #[cfg(feature = "embeddings")]
@@ -79,6 +81,7 @@ pub mod session_metrics;
 pub mod side_panel;
 pub mod sidecar;
 pub mod skill;
+pub mod skill_runtime;
 pub mod soft_interrupt_store;
 pub mod sponsors;
 pub mod stdin_detect;

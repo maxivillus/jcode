@@ -215,6 +215,21 @@ impl Agent {
                 .message_timestamps
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
+            let context_plan = self.prepare_context_preflight(send_messages, &tools, &split_prompt);
+            let context_revision = context_plan.revision;
+            if context_plan.needs_compaction()
+                && self.try_auto_compact_after_context_limit("context length preflight exceeded")
+            {
+                context_limit_retries += 1;
+                if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                    logging::warn("Context-limit preflight retry limit reached; giving up");
+                    return Err(anyhow::anyhow!(
+                        "Context limit exceeded after {} preflight compaction retries",
+                        Self::MAX_CONTEXT_LIMIT_RETRIES
+                    ));
+                }
+                continue;
+            }
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             let provider = Arc::clone(&self.provider);
             // Capture the model id the request was issued with. A provider may
@@ -1000,6 +1015,9 @@ impl Agent {
                 cache_read_input_tokens: usage_cache_read,
                 cache_creation_input_tokens: usage_cache_creation,
             };
+            if let Some(input) = usage_input {
+                self.record_context_usage(context_revision, input);
+            }
 
             // Detect a transparent mid-request model switch (e.g. Anthropic's
             // retired `claude-fable-5` falling back to `claude-opus-4-8`). The

@@ -1078,6 +1078,37 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
+                if trimmed == "/context" || trimmed.starts_with("/context ") {
+                    if trimmed == "/context" || trimmed == "/context status" {
+                        // Не показываем старый server snapshot перед новым
+                        // запросом. Полный локальный отчёт остаётся доступен,
+                        // а свежие server данные придут отдельным событием.
+                        app.remote_context_status = None;
+                        app.pending_remote_context_status_request = None;
+                        app_mod::state_ui::handle_info_command(app, trimmed);
+                        match remote.request_state().await {
+                            Ok(request_id) => {
+                                app.pending_remote_context_status_request = Some(request_id);
+                                app.set_status_notice("Запрашиваю status удалённого context...");
+                            }
+                            Err(error) => {
+                                app.push_display_message(DisplayMessage::error(format!(
+                                    "Не удалось запросить status удалённого context: {}",
+                                    error
+                                )));
+                                app.set_status_notice(
+                                    "Запрос status удалённого context не выполнен",
+                                );
+                            }
+                        }
+                    } else {
+                        // Snapshot остаётся локальным redacted metadata-файлом.
+                        // Он не должен незаметно выдавать устаревший server state.
+                        app_mod::state_ui::handle_info_command(app, trimmed);
+                    }
+                    return Ok(());
+                }
+
                 if app_mod::commands::handle_agents_command(app, trimmed) {
                     return Ok(());
                 }

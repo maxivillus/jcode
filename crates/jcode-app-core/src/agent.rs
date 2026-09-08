@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 mod compaction;
+mod context_control;
 mod environment;
 mod inline_tail;
 mod interrupts;
@@ -26,6 +27,7 @@ use crate::build;
 use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
 use crate::cache_tracker::CacheTracker;
 use crate::compaction::CompactionEvent;
+use crate::context_controller::ContextController;
 use crate::id;
 use crate::logging;
 use crate::message::{
@@ -224,6 +226,8 @@ pub struct Agent {
     /// to avoid cache invalidation when MCP tools arrive asynchronously.
     /// Cleared on compaction/reset.
     locked_tools: Option<Vec<ToolDefinition>>,
+    /// Revision and budget tracking for provider-facing context snapshots.
+    context_controller: ContextController,
     /// One-shot guard for the async MCP-registration race (#206).
     ///
     /// MCP servers connect on a background task and register `mcp__*` tools
@@ -318,6 +322,7 @@ impl Agent {
             cache_tracker: CacheTracker::new(),
             last_usage: TokenUsage::default(),
             locked_tools: None,
+            context_controller: ContextController::default(),
             mcp_late_register_resolved: false,
             system_prompt_override: None,
             agents_md_snapshot,
@@ -365,6 +370,10 @@ impl Agent {
             .iter()
             .map(|skill| skill.name.clone())
             .collect()
+    }
+
+    pub(crate) fn context_manifest(&self) -> &crate::context::ContextManifest {
+        self.context_controller.manifest()
     }
 
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
@@ -592,6 +601,7 @@ impl Agent {
         self.cache_tracker.reset();
         self.last_usage = TokenUsage::default();
         self.locked_tools = None;
+        self.context_controller = ContextController::default();
         self.mcp_late_register_resolved = false;
         self.rewind_undo_snapshot = None;
     }

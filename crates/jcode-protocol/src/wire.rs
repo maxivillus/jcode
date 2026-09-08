@@ -1047,6 +1047,10 @@ pub enum ServerEvent {
         session_id: String,
         message_count: usize,
         is_processing: bool,
+        /// Aggregate context-control metadata, when the live Agent snapshot
+        /// was available without waiting for a busy turn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_status: Option<ContextStatusSnapshot>,
     },
 
     /// Response for debug command
