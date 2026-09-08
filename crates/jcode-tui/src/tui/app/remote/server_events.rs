@@ -2880,6 +2880,27 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             false
         }
+        ServerEvent::ProviderResetResult {
+            message, success, ..
+        } => {
+            if success {
+                app.reset_provider_context_state();
+                if let Err(error) = app.session.save() {
+                    crate::logging::warn(&format!(
+                        "Не удалось сохранить local session после remote provider reset: {}",
+                        error
+                    ));
+                }
+                app.remote_context_status = None;
+                app.pending_remote_context_status_request = None;
+                app.push_display_message(DisplayMessage::system(message));
+                app.set_status_notice("Provider context сброшен");
+            } else {
+                app.push_display_message(DisplayMessage::error(message));
+                app.set_status_notice("Сброс provider context не выполнен");
+            }
+            false
+        }
         ServerEvent::ResumeAllResult {
             resumed, message, ..
         } => {

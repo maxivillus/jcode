@@ -965,6 +965,15 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Сбросить provider context без изменения transcript.
+    pub async fn reset_provider(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        let request = Request::ResetProvider { id };
+        self.next_request_id += 1;
+        self.send_request(request).await?;
+        Ok(id)
+    }
+
     /// Trigger immediate memory extraction on the server for the active session.
     pub async fn trigger_memory_extraction(&mut self) -> Result<()> {
         let id = self.next_request_id;

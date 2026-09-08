@@ -616,6 +616,7 @@ impl Request {
             Request::Split { id } => *id,
             Request::Transfer { id } => *id,
             Request::Compact { id } => *id,
+            Request::ResetProvider { id } => *id,
             Request::TriggerMemoryExtraction { id } => *id,
             Request::NotifyAuthChanged { id, .. } => *id,
             Request::SwitchAnthropicAccount { id, .. } => *id,

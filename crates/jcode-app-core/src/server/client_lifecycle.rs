@@ -1,9 +1,9 @@
 use super::available_models_dedup::available_models_dedup_key;
 use super::client_actions::{
     AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
-    handle_notify_session, handle_rename_session, handle_run_subagent, handle_set_feature,
-    handle_set_subagent_model, handle_split, handle_stdin_response, handle_transfer,
-    handle_trigger_memory_extraction,
+    handle_notify_session, handle_rename_session, handle_reset_provider, handle_run_subagent,
+    handle_set_feature, handle_set_subagent_model, handle_split, handle_stdin_response,
+    handle_transfer, handle_trigger_memory_extraction,
 };
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
@@ -1957,6 +1957,20 @@ pub(super) async fn handle_client(
 
             Request::Compact { id } => {
                 handle_compact(id, &agent, &client_event_tx);
+            }
+
+            Request::ResetProvider { id } => {
+                if reject_if_agent_busy_for_request(
+                    id,
+                    "reset_provider",
+                    &client_session_id,
+                    client_is_processing,
+                    &agent,
+                    &client_event_tx,
+                ) {
+                    continue;
+                }
+                handle_reset_provider(id, &agent, &client_event_tx);
             }
 
             Request::TriggerMemoryExtraction { id } => {

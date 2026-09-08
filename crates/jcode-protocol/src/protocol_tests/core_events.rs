@@ -199,6 +199,37 @@ fn test_rewind_undo_request_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_provider_reset_request_and_result_roundtrip() -> Result<()> {
+    let request = Request::ResetProvider { id: 12 };
+    let json = serde_json::to_string(&request)?;
+    assert!(json.contains("\"type\":\"reset_provider\""));
+    let decoded = parse_request_json(&json)?;
+    assert_eq!(decoded.id(), 12);
+    assert!(matches!(decoded, Request::ResetProvider { id: 12 }));
+
+    let event = ServerEvent::ProviderResetResult {
+        id: 12,
+        message: "reset".to_string(),
+        success: true,
+    };
+    let json = serde_json::to_string(&event)?;
+    assert!(json.contains("\"type\":\"provider_reset_result\""));
+    let decoded = parse_event_json(&json)?;
+    let ServerEvent::ProviderResetResult {
+        id,
+        message,
+        success,
+    } = decoded
+    else {
+        return Err(anyhow!("wrong provider reset event type"));
+    };
+    assert_eq!(id, 12);
+    assert_eq!(message, "reset");
+    assert!(success);
+    Ok(())
+}
+
+#[test]
 fn test_rename_session_request_roundtrip() -> Result<()> {
     let req = Request::RenameSession {
         id: 10,

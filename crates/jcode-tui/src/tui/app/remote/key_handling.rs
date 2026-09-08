@@ -1078,6 +1078,24 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
+                if trimmed == "/context compact" {
+                    app.push_display_message(DisplayMessage::system(
+                        "Запрашиваю compact удалённого context...".to_string(),
+                    ));
+                    remote.compact().await?;
+                    return Ok(());
+                }
+
+                if trimmed == "/context reset-provider" {
+                    app.remote_context_status = None;
+                    app.pending_remote_context_status_request = None;
+                    app.push_display_message(DisplayMessage::system(
+                        "Запрашиваю сброс provider context на удалённом server...".to_string(),
+                    ));
+                    remote.reset_provider().await?;
+                    return Ok(());
+                }
+
                 if trimmed == "/context" || trimmed.starts_with("/context ") {
                     if trimmed == "/context" || trimmed == "/context status" {
                         // Не показываем старый server snapshot перед новым

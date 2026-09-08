@@ -326,6 +326,10 @@ pub enum Request {
     #[serde(rename = "compact")]
     Compact { id: u64 },
 
+    /// Сбросить provider session и cache baseline без изменения transcript
+    #[serde(rename = "reset_provider")]
+    ResetProvider { id: u64 },
+
     /// Trigger immediate memory extraction for the current session
     #[serde(rename = "trigger_memory_extraction")]
     TriggerMemoryExtraction { id: u64 },
@@ -1442,6 +1446,16 @@ pub enum ServerEvent {
         /// Human-readable status message
         message: String,
         /// Whether compaction was started successfully
+        success: bool,
+    },
+
+    /// Ответ на запрос сброса provider context
+    #[serde(rename = "provider_reset_result")]
+    ProviderResetResult {
+        id: u64,
+        /// Человекочитаемое сообщение о результате
+        message: String,
+        /// Указывает, завершился ли сброс успешно
         success: bool,
     },
 
