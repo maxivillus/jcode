@@ -1944,6 +1944,37 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
 
     if let Some(command) = parse_context_command(trimmed) {
         match command {
+            ContextCommand::Compact => {
+                super::commands::handle_config_command(app, "/compact");
+                return true;
+            }
+            ContextCommand::ResetProvider => {
+                if app.is_processing {
+                    app.push_display_message(DisplayMessage::error(
+                        "Сброс provider context разрешён только в безопасной границе при простое."
+                            .to_string(),
+                    ));
+                    return true;
+                }
+
+                app.reset_provider_context_state();
+                match app.session.save() {
+                    Ok(()) => {
+                        app.push_display_message(DisplayMessage::system(
+                            "Provider context сброшен. Следующий turn отправит текущий context заново."
+                                .to_string(),
+                        ));
+                        app.set_status_notice("Provider context сброшен");
+                    }
+                    Err(error) => {
+                        app.push_display_message(DisplayMessage::error(format!(
+                            "Provider context сброшен в памяти, но сохранение session завершилось ошибкой: {}",
+                            error
+                        )));
+                    }
+                }
+                return true;
+            }
             ContextCommand::Preview => {
                 app.push_display_message(
                     DisplayMessage::system(build_context_preview(app))
@@ -1988,7 +2019,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             }
             ContextCommand::Invalid => {
                 app.push_display_message(DisplayMessage::error(
-                    "Usage: /context, /context status, /context preview, /context export [path], /context snapshot [path]".to_string(),
+                    "Использование: /context, /context status, /context preview, /context compact, /context reset-provider, /context export [path], /context snapshot [path]".to_string(),
                 ));
                 return true;
             }
@@ -2304,6 +2335,8 @@ pub(super) fn format_remote_context_status(
 enum ContextCommand {
     Report,
     Preview,
+    Compact,
+    ResetProvider,
     Snapshot(Option<PathBuf>),
     Export(Option<PathBuf>),
     Invalid,
@@ -2324,6 +2357,8 @@ fn parse_context_command(trimmed: &str) -> Option<ContextCommand> {
     match action {
         "status" if path.is_none() => Some(ContextCommand::Report),
         "preview" if path.is_none() => Some(ContextCommand::Preview),
+        "compact" if path.is_none() => Some(ContextCommand::Compact),
+        "reset-provider" if path.is_none() => Some(ContextCommand::ResetProvider),
         "snapshot" | "save" => Some(ContextCommand::Snapshot(path.map(PathBuf::from))),
         "export" => Some(ContextCommand::Export(path.map(PathBuf::from))),
         _ => Some(ContextCommand::Invalid),
@@ -2623,6 +2658,26 @@ mod context_command_tests {
         );
         assert_eq!(
             parse_context_command("/context preview notes/context.md"),
+            Some(ContextCommand::Invalid)
+        );
+    }
+
+    #[test]
+    fn parses_typed_compact_and_provider_reset_commands() {
+        assert_eq!(
+            parse_context_command("/context compact"),
+            Some(ContextCommand::Compact)
+        );
+        assert_eq!(
+            parse_context_command("/context reset-provider"),
+            Some(ContextCommand::ResetProvider)
+        );
+        assert_eq!(
+            parse_context_command("/context compact now"),
+            Some(ContextCommand::Invalid)
+        );
+        assert_eq!(
+            parse_context_command("/context reset-provider now"),
             Some(ContextCommand::Invalid)
         );
     }
