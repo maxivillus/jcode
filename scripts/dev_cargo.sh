@@ -1014,7 +1014,7 @@ run_local_cargo() {
     cargo "${cargo_argv[@]}" 2>&1 | tee "$output_file" || status=${PIPESTATUS[0]}
     if [[ "$status" -eq 0 ]] \
       && grep -qE '^running 0 tests$' "$output_file" \
-      && ! grep -qE '^running [1-9][0-9]* tests$' "$output_file"; then
+      && ! grep -qE '^running [1-9][0-9]* tests?$' "$output_file"; then
       printf 'dev_cargo: explicit cargo test filter matched zero tests; check the test path/name or set JCODE_DEV_CARGO_ALLOW_ZERO_TESTS=1 to allow this intentionally\n' >&2
       rm -f "$output_file"
       return 97
