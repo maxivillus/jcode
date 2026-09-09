@@ -40,6 +40,11 @@ jobs:
               return;
             }
 
+            if (context.payload.repository?.has_issues === false) {
+              core.info('Issue tracking is disabled in this repository; linked-issue check is not applicable.');
+              return;
+            }
+
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const text = `${pr.title || ''}\n\n${pr.body || ''}`;
