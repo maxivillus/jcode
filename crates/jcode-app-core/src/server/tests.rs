@@ -423,6 +423,14 @@ async fn background_task_wake_runs_live_session_immediately_when_idle() {
 async fn external_background_task_wake_emits_request_without_starting_turn() {
     let _env_lock = crate::storage::lock_test_env();
     let _wake_mode = ScopedEnvVar::set("JCODE_WAKE_MODE", "external");
+    // jcode-base is a dependency here, so its config cache uses the
+    // non-test throttle. Force the scoped environment override to be visible
+    // immediately and avoid order-dependent reuse of Internal mode.
+    crate::config::invalidate_config_cache();
+    assert_eq!(
+        crate::config::config().server.wake_mode,
+        crate::config::WakeMode::External
+    );
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![
         StreamEvent::TextDelta("must not run".to_string()),
@@ -494,6 +502,9 @@ async fn external_background_task_wake_emits_request_without_starting_turn() {
     );
     assert_eq!(agent.lock().await.messages().len(), initial_message_count);
     assert!(soft_interrupt_queues.read().await.is_empty());
+
+    drop(_wake_mode);
+    crate::config::invalidate_config_cache();
 }
 
 #[tokio::test]
