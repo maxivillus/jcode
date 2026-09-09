@@ -1356,13 +1356,11 @@ fn onboarding_banner_renders_prompt_and_both_action_rows() {
         Line::from("Welcome to jcode"),
         Line::from("Choose how to begin."),
     ]);
-
     let backend = ratatui::backend::TestBackend::new(120, 40);
     let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
     terminal
         .draw(|frame| picker.render(frame))
         .expect("render onboarding picker");
-
     let buffer = terminal.backend().buffer().clone();
     let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
     let lines = (0..buffer.area.height)
@@ -1393,7 +1391,6 @@ fn onboarding_banner_renders_prompt_and_both_action_rows() {
         !text.contains('╭') && !text.contains('╰') && !text.contains('│'),
         "onboarding choice should not render an outer boundary: {lines:#?}"
     );
-
     let welcome_y = lines
         .iter()
         .position(|line| line.contains("Welcome to jcode"))
@@ -1412,7 +1409,8 @@ fn onboarding_banner_renders_prompt_and_both_action_rows() {
     let start_x = lines[start_y]
         .find("Start in the current directory")
         .expect("start-new column");
-
+    let start_display_x = unicode_width::UnicodeWidthStr::width(&lines[start_y][..start_x]);
+    let start_label_width = unicode_width::UnicodeWidthStr::width("Start in the current directory");
     assert!(
         welcome_y < review_y,
         "welcome copy should introduce the centered suggested prompt: {lines:#?}"
@@ -1426,7 +1424,9 @@ fn onboarding_banner_renders_prompt_and_both_action_rows() {
         "suggested prompt should span the visual center: {lines:#?}"
     );
     assert!(
-        start_y >= buffer.area.height as usize - 3 && start_x >= 95,
+        start_y >= buffer.area.height as usize - 3
+            && start_display_x >= buffer.area.width as usize * 2 / 3
+            && start_display_x + start_label_width <= buffer.area.width as usize,
         "blank-session action should stay secondary in the bottom-right: {lines:#?}"
     );
 }

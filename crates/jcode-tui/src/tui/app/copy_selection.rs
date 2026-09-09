@@ -405,13 +405,25 @@ impl App {
             return false;
         }
 
+        let is_input_pane = matches!(
+            self.current_copy_selection_pane(),
+            Some(crate::tui::CopySelectionPane::Input)
+        );
         let success = copy_text(&text);
-        self.copy_selection_mode = false;
-        self.copy_selection_dragging = false;
-        self.copy_selection_pending_anchor = None;
-        self.copy_selection_edge_autoscroll = None;
+        if is_input_pane {
+            self.exit_copy_selection_mode();
+        } else {
+            self.copy_selection_mode = false;
+            self.copy_selection_dragging = false;
+            self.copy_selection_pending_anchor = None;
+            self.copy_selection_edge_autoscroll = None;
+        }
         self.set_status_notice(if success {
-            "Copied selection · highlight remains visible"
+            if is_input_pane {
+                "Copied selection"
+            } else {
+                "Copied selection · highlight remains visible"
+            }
         } else {
             "Failed to copy selection"
         });

@@ -655,7 +655,6 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
         "{}",
         narrow.join("\n")
     );
-
     let wide = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off)
         .iter()
         .map(extract_line_text)
@@ -666,8 +665,9 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
         "wide={wide:?}"
     );
     assert!(
-        wide.iter().any(|line| line.contains('…')),
-        "wide intent should remain on one ellipsized line: {wide:?}"
+        without_whitespace(&wide.join(" ")).contains(&without_whitespace(long_text))
+            && !wide.iter().any(|line| line.contains('…')),
+        "wide intent should wrap fully without ellipsization: {wide:?}"
     );
     assert!(
         !narrow

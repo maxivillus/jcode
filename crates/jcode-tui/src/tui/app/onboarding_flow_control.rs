@@ -1043,7 +1043,7 @@ impl App {
         let Some(repository) = self.onboarding_recent_project_path() else {
             self.onboarding_show_suggestions();
             self.set_status_notice(
-                "No active Git repository found. Start jcode inside a project to review it.",
+                "No recent Git repository found. Start jcode inside a project to review it.",
             );
             return false;
         };

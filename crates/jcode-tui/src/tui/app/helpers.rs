@@ -500,10 +500,9 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
     }
 }
 
-/// Copy to clipboard using the OSC 52 terminal escape sequence. This asks the
-/// terminal emulator to set the system clipboard without needing a local
-/// display server, making it work over SSH, inside Docker, and under tmux
-/// (with `set -g set-clipboard on`). Returns false if stdout is not a TTY.
+/// Copy to clipboard via OSC 52. It works over SSH, Docker, and tmux (`set -g
+/// set-clipboard on`). Returns false if stdout is not a TTY.
+#[cfg(not(test))]
 fn copy_to_clipboard_osc52(text: &str) -> bool {
     use base64::Engine as _;
     use std::io::{IsTerminal, Write};
