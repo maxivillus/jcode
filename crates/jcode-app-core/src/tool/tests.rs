@@ -542,8 +542,10 @@ async fn tool_descriptions_stay_under_token_cap() {
     const DESCRIPTION_TOKEN_CAP: usize = 20;
     // integration_tools keeps a deliberate second sentence explaining that catalog
     // entries integrate directly with the agent.
+    // batch keeps a structured tool-call example so callers can construct a valid
+    // parallel request without consulting another prompt.
     // swarm appends the user-tunable swarm-prompt.md by design.
-    const EXEMPT: &[&str] = &["integration_tools", "swarm"];
+    const EXEMPT: &[&str] = &["batch", "integration_tools", "swarm"];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;

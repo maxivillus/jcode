@@ -815,17 +815,17 @@ impl Tool for TodoTool {
                             "feedback_loop_relevance": {
                                 "type": "string",
                                 "enum": ["indirect", "synthetic", "representative", "acceptance_blocked", "acceptance_aligned"],
-                                "description": "How directly checks represent observable acceptance behavior. indirect = inspection or an internal proxy; synthetic = custom harnesses, stubs, mocks, copied sources, or synthetic fixtures; representative = real public interfaces but not the complete acceptance workflow; acceptance_blocked = the real acceptance workflow was attempted but an external constraint prevented a result; acceptance_aligned = the real project build, integration test, or end-user workflow passed. Substitute-only validation is never acceptance_aligned."
+                                "description": "Public interfaces: indirect, synthetic, representative, acceptance_blocked, or acceptance_aligned."
                             },
                             "feedback_loop_coverage": {
                                 "type": "string",
                                 "enum": ["narrow", "main_paths", "edge_and_integration_paths"],
-                                "description": "How broadly the checks exercise main workflows, integration boundaries, edge cases, packaging, and likely failure modes."
+                                "description": "Coverage: main paths, integration boundaries, edge cases, packaging, likely failure modes."
                             },
                             "feedback_loop_traceability": {
                                 "type": "string",
                                 "enum": ["unmapped", "partial", "complete"],
-                                "description": "How completely requirements map to evidence. unmapped = requirements are not tied to checks; partial = only some explicit requirements or changed public outputs have concrete checks and observed results; complete = every explicit requirement and changed public output has a concrete check and observed result. Aggregate test counts alone do not establish complete traceability."
+                                "description": "Requirements-to-check mapping: unmapped, partial, or complete. Counts alone are insufficient."
                             },
                             "delivery_state": {
                                 "type": "string",
@@ -1051,15 +1051,11 @@ mod tests {
         );
         let relevance_description = goal_props["feedback_loop_relevance"]["description"]
             .as_str()
-            .expect("feedback-loop relevance should explain every state");
-        for required_concept in [
-            "custom harnesses",
-            "real public interfaces",
-            "external constraint",
-            "Substitute-only validation is never acceptance_aligned",
-        ] {
-            assert!(relevance_description.contains(required_concept));
-        }
+            .expect("feedback-loop relevance should name its acceptance boundary");
+        assert_eq!(
+            relevance_description,
+            "Public interfaces: indirect, synthetic, representative, acceptance_blocked, or acceptance_aligned."
+        );
 
         let goal_required = props["goals"]["items"]["required"]
             .as_array()
@@ -1092,21 +1088,20 @@ mod tests {
             .expect("alignment score should describe representation coverage");
         assert!(alignment_description.contains("what the user wants"));
         assert!(alignment_description.contains("when guessing"));
-        // The detailed calibration rubric moved out of the always-on schema
-        // into deferred turn-finish continuation messages, which are paid only
-        // when the completed turn needs another quality pass.
-        for required_concept in [
-            "requirement inventory",
-            "outcomes, deliverables, constraints, prohibited actions",
-            "integration paths, edge cases, and necessary follow-through",
-            "Do not ask the user",
-        ] {
-            assert!(
-                crate::todo::TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE
-                    .contains(required_concept),
-                "intent gate message omitted {required_concept}"
-            );
-        }
+        // The public continuation is intentionally concise. Detailed calibration
+        // remains in deferred or private gate messages, not the always-on schema.
+        assert!(
+            crate::todo::TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE
+                .contains("Understand the user's intent better")
+        );
+        assert!(
+            crate::todo::TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE
+                .contains("Try to avoid asking")
+        );
+        assert!(
+            crate::todo::TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE
+                .contains("Make sure the todo is up to date")
+        );
         let feedback_description = goal_props["feedback_loop"]
             .get("description")
             .and_then(Value::as_str)
@@ -1123,17 +1118,20 @@ mod tests {
             feedback_description_lower.contains("explicit observation or check"),
             "feedback_loop description omitted per-requirement check coverage: {feedback_description}"
         );
-        for required_concept in [
-            "reports back on each requirement",
-            "run tests, verify, or review count only",
-            "non-testable requirements",
-        ] {
-            assert!(
-                crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
-                    .contains(required_concept),
-                "feedback gate message omitted {required_concept}"
-            );
-        }
+        // The public continuation is intentionally concise. Detailed
+        // requirement-to-check guidance stays in deferred or private gate messages.
+        assert!(
+            crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
+                .contains("Your feedback loop isn't good enough")
+        );
+        assert!(
+            crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
+                .contains("Think about what feedback loops you need")
+        );
+        assert!(
+            crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
+                .contains("Make sure the todo is up to date")
+        );
         assert!(
             !alignment_description
                 .to_ascii_lowercase()
