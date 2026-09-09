@@ -78,6 +78,22 @@ pub struct TokenUsageTotals {
     pub cache_creation_input_tokens: u64,
 }
 
+/// Read-only provider-facing context metadata returned by state queries.
+///
+/// The snapshot deliberately contains aggregate counters and fingerprints only.
+/// It never carries prompt text, transcript content, tool arguments, images, or
+/// credential values across the protocol boundary.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextStatusSnapshot {
+    pub schema_version: u32,
+    pub revision: u64,
+    pub provider_generation: u64,
+    pub estimated_input_tokens: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_input_tokens: Option<usize>,
+    pub fingerprint: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(transparent)]
 pub struct AuthProviderId(pub String);
@@ -574,7 +590,7 @@ impl Request {
             Request::DebugCommand { id, .. } => *id,
             Request::ClientDebugCommand { id, .. } => *id,
             Request::ClientDebugResponse { id, .. } => *id,
-            Request::Subscribe { id, .. } => *id,
+            Request::Subscribe { id, .. } | Request::PrepareDisconnect { id } => *id,
             Request::GetHistory { id } => *id,
             Request::GetModelCatalog { id } => *id,
             Request::GetCompactedHistory { id, .. } => *id,
@@ -600,6 +616,7 @@ impl Request {
             Request::Split { id } => *id,
             Request::Transfer { id } => *id,
             Request::Compact { id } => *id,
+            Request::ResetProvider { id } => *id,
             Request::TriggerMemoryExtraction { id } => *id,
             Request::NotifyAuthChanged { id, .. } => *id,
             Request::SwitchAnthropicAccount { id, .. } => *id,

@@ -1942,7 +1942,101 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
-    if trimmed == "/context" {
+    if let Some(command) = parse_context_command(trimmed) {
+        match command {
+            ContextCommand::Refresh => {
+                app.refresh_context_snapshot();
+                app.push_display_message(DisplayMessage::system(
+                    "Локальный context preview обновлён. Transcript и provider context не удалялись. Перед следующим provider request Agent снова проверит system prompt, AGENTS snapshot, skill runtime registry, tools и messages."
+                        .to_string(),
+                ));
+                app.set_status_notice("Context refreshed");
+                return true;
+            }
+            ContextCommand::Compact => {
+                super::commands::handle_config_command(app, "/compact");
+                return true;
+            }
+            ContextCommand::ResetProvider => {
+                if app.is_processing {
+                    app.push_display_message(DisplayMessage::error(
+                        "Сброс provider context разрешён только в безопасной границе при простое."
+                            .to_string(),
+                    ));
+                    return true;
+                }
+
+                app.reset_provider_context_state();
+                match app.session.save() {
+                    Ok(()) => {
+                        app.push_display_message(DisplayMessage::system(
+                            "Provider context сброшен. Следующий turn отправит текущий context заново."
+                                .to_string(),
+                        ));
+                        app.set_status_notice("Provider context сброшен");
+                    }
+                    Err(error) => {
+                        app.push_display_message(DisplayMessage::error(format!(
+                            "Provider context сброшен в памяти, но сохранение session завершилось ошибкой: {}",
+                            error
+                        )));
+                    }
+                }
+                return true;
+            }
+            ContextCommand::Preview => {
+                app.push_display_message(
+                    DisplayMessage::system(build_context_preview(app))
+                        .with_title("Context preview"),
+                );
+                app.set_status_notice("Context preview");
+                return true;
+            }
+            ContextCommand::Snapshot(path) | ContextCommand::Export(path) => {
+                let path = path
+                    .map(Ok)
+                    .unwrap_or_else(|| default_context_snapshot_path(app));
+                let path = match path {
+                    Ok(path) => path,
+                    Err(error) => {
+                        app.push_display_message(DisplayMessage::error(error));
+                        return true;
+                    }
+                };
+                let snapshot = match build_context_metadata_snapshot(app) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        app.push_display_message(DisplayMessage::error(error));
+                        return true;
+                    }
+                };
+                match write_new_context_snapshot(&path, &snapshot) {
+                    Ok(()) => {
+                        app.push_display_message(DisplayMessage::system(format!(
+                            "Context metadata snapshot written to:\n\n  {}",
+                            path.display()
+                        )));
+                        app.set_status_notice("Context snapshot saved");
+                    }
+                    Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                        "Failed to write context snapshot {}: {}",
+                        path.display(),
+                        error
+                    ))),
+                }
+                return true;
+            }
+            ContextCommand::Invalid => {
+                app.push_display_message(DisplayMessage::error(
+                    "Использование: /context, /context status, /context preview, /context refresh, /context compact, /context reset-provider, /context export [path], /context snapshot [path]".to_string(),
+                ));
+                return true;
+            }
+            ContextCommand::Report => {}
+        }
+    }
+
+    if trimmed == "/context" || trimmed == "/context status" {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
@@ -2122,6 +2216,10 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             context.estimated_tokens()
         ));
         context_report.push_str(&format!(
+            "- client context revision: {}\n- provider context limit: {}\n",
+            app.context_revision, app.context_limit
+        ));
+        context_report.push_str(&format!(
             "- prompt prefix before any user text: {} chars (~{} tokens)\n- tool definitions only: {} chars (~{} tokens)\n",
             context.prompt_prefix_chars(),
             context.prompt_prefix_tokens(),
@@ -2210,4 +2308,515 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     false
+}
+
+pub(super) fn format_remote_context_status(
+    status: Option<&crate::protocol::ContextStatusSnapshot>,
+) -> String {
+    let Some(status) = status else {
+        return "- snapshot provider: недоступен (сервер занят или не передал данные)\n"
+            .to_string();
+    };
+
+    let observed = status
+        .observed_input_tokens
+        .map(|tokens| tokens.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    let fingerprint = status.fingerprint.chars().take(16).collect::<String>();
+    let fingerprint = if fingerprint.is_empty() {
+        "none"
+    } else {
+        fingerprint.as_str()
+    };
+
+    format!(
+        "- schema: {}\n- revision: {}\n- поколение provider: {}\n- оценка входных tokens: {}\n- наблюдённые входные tokens: {}\n- prefix fingerprint: {}\n",
+        status.schema_version,
+        status.revision,
+        status.provider_generation,
+        status.estimated_input_tokens,
+        observed,
+        fingerprint,
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ContextCommand {
+    Report,
+    Preview,
+    Refresh,
+    Compact,
+    ResetProvider,
+    Snapshot(Option<PathBuf>),
+    Export(Option<PathBuf>),
+    Invalid,
+}
+
+fn parse_context_command(trimmed: &str) -> Option<ContextCommand> {
+    if trimmed == "/context" {
+        return Some(ContextCommand::Report);
+    }
+
+    let arguments = trimmed.strip_prefix("/context ")?;
+    let mut parts = arguments.trim().splitn(2, char::is_whitespace);
+    let action = parts.next().unwrap_or_default();
+    let path = parts.next().map(str::trim).filter(|path| !path.is_empty());
+
+    match action {
+        "status" if path.is_none() => Some(ContextCommand::Report),
+        "preview" if path.is_none() => Some(ContextCommand::Preview),
+        "refresh" if path.is_none() => Some(ContextCommand::Refresh),
+        "compact" if path.is_none() => Some(ContextCommand::Compact),
+        "reset-provider" if path.is_none() => Some(ContextCommand::ResetProvider),
+        "snapshot" | "save" => Some(ContextCommand::Snapshot(path.map(PathBuf::from))),
+        "export" => Some(ContextCommand::Export(path.map(PathBuf::from))),
+        _ => Some(ContextCommand::Invalid),
+    }
+}
+
+fn build_context_preview(app: &App) -> String {
+    let snapshot = app.context_snapshot();
+    let compaction = if app.provider.supports_compaction() {
+        if app.session.compaction.is_some() {
+            "supported, session state present"
+        } else {
+            "supported, no session summary"
+        }
+    } else {
+        "not supported by current provider"
+    };
+
+    format_context_preview(&snapshot, app.context_limit, compaction)
+}
+
+fn format_context_preview(
+    snapshot: &crate::tui::ContextSnapshot,
+    context_limit: u64,
+    compaction: &str,
+) -> String {
+    let has_fresh_info = snapshot.fresh && snapshot.info.is_some();
+    let freshness = if has_fresh_info {
+        "fresh"
+    } else {
+        "unavailable"
+    };
+    let mut preview = format!(
+        "Context Preview (read-only)\n\n- context revision: {}\n- freshness: {}\n- compaction: {}\n",
+        snapshot.revision, freshness, compaction
+    );
+
+    if let Some(context) = snapshot.info.as_ref().filter(|_| snapshot.fresh) {
+        let estimated_tokens = context.estimated_tokens() as u64;
+        let dynamic_chars = context
+            .user_messages_chars
+            .saturating_add(context.assistant_messages_chars)
+            .saturating_add(context.tool_calls_chars)
+            .saturating_add(context.tool_results_chars);
+        let limit_state = if context_limit == 0 {
+            "unknown".to_string()
+        } else if estimated_tokens > context_limit {
+            format!("over limit by {} tokens", estimated_tokens - context_limit)
+        } else {
+            format!("{} tokens available", context_limit - estimated_tokens)
+        };
+
+        preview.push_str(&format!(
+            "- estimated context: {} tokens ({} chars)\n- provider limit: {} tokens\n- headroom: {}\n- dynamic conversation: {} chars (~{} tokens)\n- user/assistant/tool results: {}/{}/{}\n",
+            estimated_tokens,
+            context.total_chars,
+            if context_limit == 0 {
+                "unknown".to_string()
+            } else {
+                context_limit.to_string()
+            },
+            limit_state,
+            dynamic_chars,
+            dynamic_chars / 4,
+            context.user_messages_count,
+            context.assistant_messages_count,
+            context.tool_results_count,
+        ));
+    } else {
+        preview.push_str(
+            "- aggregate metrics: unavailable because the current snapshot is not fresh\n",
+        );
+    }
+
+    preview.push_str(
+        "\nNo context was changed. This is an estimate only. /cls clears the view and does not reduce provider context.\n",
+    );
+    preview
+}
+
+fn default_context_snapshot_path(app: &App) -> Result<PathBuf, String> {
+    let cwd = std::env::current_dir()
+        .map_err(|error| format!("Failed to resolve current directory: {}", error))?;
+    let session_suffix = app
+        .active_client_session_id()
+        .unwrap_or("session")
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+        .take(24)
+        .collect::<String>();
+    let session_suffix = if session_suffix.is_empty() {
+        "session"
+    } else {
+        session_suffix.as_str()
+    };
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    Ok(cwd.join(format!(
+        "jcode-context-{}-{}.md",
+        timestamp_ms, session_suffix
+    )))
+}
+
+fn build_context_metadata_snapshot(app: &App) -> Result<String, String> {
+    let context_snapshot = app.context_snapshot();
+    if !context_snapshot.fresh {
+        return Err(
+            "Context metadata export skipped: the current context snapshot is not fresh."
+                .to_string(),
+        );
+    }
+    let context = context_snapshot.info.ok_or_else(|| {
+        "Context metadata export skipped: aggregate context data is unavailable.".to_string()
+    })?;
+    let session_id = app
+        .active_client_session_id()
+        .unwrap_or(app.session.id.as_str());
+    let provider = if app.is_remote {
+        app.remote_provider_name.as_deref().unwrap_or("unknown")
+    } else {
+        app.provider.name()
+    };
+    let model = if app.is_remote {
+        app.remote_provider_model
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string())
+    } else {
+        app.provider.model()
+    };
+
+    Ok(format!(
+        "# jcode Context Snapshot\n\n\
+	This is a redacted metadata snapshot. It does not contain transcript text,\n\
+	prompt text, tool arguments or results, images, or credential values.\n\n\
+Generated (UTC): {}\n\
+Session id: {}\n\
+Mode: {}\n\
+Provider: {}\n\
+Model: {}\n\n\
+	## Context control\n\n\
+Client context revision: {}\n\
+Context data freshness: fresh\n\
+Provider context limit: {}\n\
+Total context characters: {}\n\
+Estimated context tokens: {}\n\n\
+## Composition counts\n\n\
+System prompt characters: {}\n\
+Session context characters: {}\n\
+Project AGENTS.md characters: {}\n\
+Global AGENTS.md characters: {}\n\
+Prompt overlay characters: {}\n\
+Skills section characters: {}\n\
+Memory section characters: {}\n\
+Preferred tools characters: {}\n\
+Tool definitions: {} characters across {} tools\n\
+User messages: {} characters across {} messages\n\
+Assistant messages: {} characters across {} messages\n\
+Tool calls: {} characters across {} calls\n\
+Tool results: {} characters across {} results\n\n\
+## Session counters\n\n\
+Input tokens recorded: {}\n\
+Output tokens recorded: {}\n\
+Queued messages: {}\n\
+Pending images: {}\n\
+Pending soft interrupts: {}\n\n\
+Snapshot policy: metadata only; use the session transcript command for the\n\
+separate persisted conversation file.\n",
+        chrono::Utc::now().to_rfc3339(),
+        session_id,
+        if app.is_remote { "remote" } else { "local" },
+        provider,
+        model,
+        app.context_revision,
+        app.context_limit,
+        context.total_chars,
+        context.estimated_tokens(),
+        context.system_prompt_chars,
+        context.session_context_chars,
+        context.project_agents_md_chars,
+        context.global_agents_md_chars,
+        context.prompt_overlay_chars,
+        context.skills_chars,
+        context.memory_chars,
+        context.preferred_tools_chars,
+        context.tool_defs_chars,
+        context.tool_defs_count,
+        context.user_messages_chars,
+        context.user_messages_count,
+        context.assistant_messages_chars,
+        context.assistant_messages_count,
+        context.tool_calls_chars,
+        context.tool_calls_count,
+        context.tool_results_chars,
+        context.tool_results_count,
+        app.token_accounting.total_input_tokens,
+        app.token_accounting.total_output_tokens,
+        app.queued_messages.len(),
+        app.pending_images.len(),
+        app.pending_soft_interrupts.len(),
+    ))
+}
+
+static CONTEXT_SNAPSHOT_TEMP_SEQUENCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn write_new_context_snapshot(path: &std::path::Path, content: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    if path.file_name().is_none() {
+        return Err("Context snapshot path must name a file".to_string());
+    }
+
+    let sequence =
+        CONTEXT_SNAPSHOT_TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary_path = parent.join(format!(
+        ".jcode-context-tmp-{}-{}",
+        std::process::id(),
+        sequence
+    ));
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let publish_result = (|| {
+        let mut file = options
+            .open(&temporary_path)
+            .map_err(|error| error.to_string())?;
+        std::io::Write::write_all(&mut file, content.as_bytes())
+            .map_err(|error| error.to_string())?;
+        std::io::Write::flush(&mut file).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        drop(file);
+
+        // Сначала полностью записываем закрытый файл. hard_link создаёт только
+        // новый путь, поэтому существующий файл нельзя заменить гонкой.
+        std::fs::hard_link(&temporary_path, path).map_err(|error| error.to_string())
+    })();
+
+    let _ = std::fs::remove_file(&temporary_path);
+    publish_result
+}
+
+#[cfg(test)]
+mod context_command_tests {
+    use super::*;
+
+    #[test]
+    fn parses_context_report_and_status() {
+        assert_eq!(
+            parse_context_command("/context"),
+            Some(ContextCommand::Report)
+        );
+        assert_eq!(
+            parse_context_command("/context status"),
+            Some(ContextCommand::Report)
+        );
+    }
+
+    #[test]
+    fn parses_snapshot_with_optional_path() {
+        assert_eq!(
+            parse_context_command("/context snapshot"),
+            Some(ContextCommand::Snapshot(None))
+        );
+        assert_eq!(
+            parse_context_command("/context save notes/context.md"),
+            Some(ContextCommand::Snapshot(Some(PathBuf::from(
+                "notes/context.md"
+            ))))
+        );
+    }
+
+    #[test]
+    fn parses_preview_and_export_with_optional_path() {
+        assert_eq!(
+            parse_context_command("/context preview"),
+            Some(ContextCommand::Preview)
+        );
+        assert_eq!(
+            parse_context_command("/context export"),
+            Some(ContextCommand::Export(None))
+        );
+        assert_eq!(
+            parse_context_command("/context export notes/context.md"),
+            Some(ContextCommand::Export(Some(PathBuf::from(
+                "notes/context.md"
+            ))))
+        );
+        assert_eq!(
+            parse_context_command("/context preview notes/context.md"),
+            Some(ContextCommand::Invalid)
+        );
+    }
+
+    #[test]
+    fn parses_typed_compact_and_provider_reset_commands() {
+        assert_eq!(
+            parse_context_command("/context compact"),
+            Some(ContextCommand::Compact)
+        );
+        assert_eq!(
+            parse_context_command("/context reset-provider"),
+            Some(ContextCommand::ResetProvider)
+        );
+        assert_eq!(
+            parse_context_command("/context compact now"),
+            Some(ContextCommand::Invalid)
+        );
+        assert_eq!(
+            parse_context_command("/context reset-provider now"),
+            Some(ContextCommand::Invalid)
+        );
+    }
+
+    #[test]
+    fn parses_refresh_without_extra_arguments() {
+        assert_eq!(
+            parse_context_command("/context refresh"),
+            Some(ContextCommand::Refresh)
+        );
+        assert_eq!(
+            parse_context_command("/context refresh now"),
+            Some(ContextCommand::Invalid)
+        );
+    }
+
+    #[test]
+    fn preview_reports_aggregate_metrics_without_mutation_claims() {
+        let mut info = crate::prompt::ContextInfo::default();
+        info.total_chars = 8_000;
+        info.user_messages_chars = 1_000;
+        info.user_messages_count = 2;
+        info.assistant_messages_chars = 2_000;
+        info.assistant_messages_count = 3;
+        info.tool_results_chars = 1_000;
+        info.tool_results_count = 4;
+        let snapshot = crate::tui::ContextSnapshot {
+            info: Some(info),
+            revision: 12,
+            fresh: true,
+        };
+
+        let output = format_context_preview(&snapshot, 4_000, "supported, no session summary");
+
+        assert!(output.contains("Context Preview (read-only)"));
+        assert!(output.contains("context revision: 12"));
+        assert!(output.contains("estimated context: 2000 tokens"));
+        assert!(output.contains("headroom: 2000 tokens available"));
+        assert!(output.contains("dynamic conversation: 4000 chars"));
+        assert!(output.contains("No context was changed"));
+        assert!(output.contains("/cls clears the view and does not reduce provider context"));
+    }
+
+    #[test]
+    fn preview_does_not_use_stale_context_info() {
+        let mut info = crate::prompt::ContextInfo::default();
+        info.total_chars = 8_000;
+        let snapshot = crate::tui::ContextSnapshot {
+            info: Some(info),
+            revision: 13,
+            fresh: false,
+        };
+
+        let output = format_context_preview(&snapshot, 4_000, "unknown");
+
+        assert!(output.contains("freshness: unavailable"));
+        assert!(output.contains("aggregate metrics: unavailable"));
+        assert!(!output.contains("estimated context: 2000 tokens"));
+    }
+
+    #[test]
+    fn formats_remote_context_status_as_aggregate_metadata() {
+        let status = crate::protocol::ContextStatusSnapshot {
+            schema_version: 1,
+            revision: 7,
+            provider_generation: 3,
+            estimated_input_tokens: 1_024,
+            observed_input_tokens: Some(900),
+            fingerprint: "0123456789abcdefpayload-marker".to_string(),
+        };
+        let output = format_remote_context_status(Some(&status));
+
+        assert!(output.contains("revision: 7"));
+        assert!(output.contains("оценка входных tokens: 1024"));
+        assert!(output.contains("prefix fingerprint: 0123456789abcdef"));
+        assert!(!output.contains("payload-marker"));
+        assert!(format_remote_context_status(None).contains("недоступен"));
+    }
+
+    #[test]
+    fn rejects_unknown_context_subcommands() {
+        assert_eq!(
+            parse_context_command("/context delete"),
+            Some(ContextCommand::Invalid)
+        );
+        assert_eq!(parse_context_command("/contextual"), None);
+    }
+
+    #[test]
+    fn snapshot_writer_is_create_only_and_private_on_unix() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("context.md");
+
+        write_new_context_snapshot(&path, "metadata only\n").expect("write snapshot");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read snapshot"),
+            "metadata only\n"
+        );
+        assert!(write_new_context_snapshot(&path, "replace\n").is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = std::fs::metadata(&path)
+                .expect("snapshot metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        let entries = std::fs::read_dir(directory.path())
+            .expect("snapshot directory")
+            .count();
+        assert_eq!(entries, 1, "temporary snapshot must be cleaned up");
+    }
+
+    #[test]
+    fn snapshot_writer_does_not_leave_partial_target_on_parent_error() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("missing").join("context.md");
+
+        assert!(write_new_context_snapshot(&path, "metadata only\n").is_err());
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .expect("snapshot directory")
+                .count(),
+            0
+        );
+    }
 }

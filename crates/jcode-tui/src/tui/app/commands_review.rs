@@ -172,8 +172,20 @@ fn judge_visible_tool_summary(tool: &ToolCall) -> Option<String> {
 
 fn build_judge_visible_transcript_messages(parent_session: &Session) -> Vec<StoredMessage> {
     let mut transcript = Vec::new();
+    let mut visible_session = parent_session.clone();
+    for message in &mut visible_session.messages {
+        message.content.retain(|block| {
+            !matches!(
+                block,
+                ContentBlock::Reasoning { .. }
+                    | ContentBlock::ReasoningTrace { .. }
+                    | ContentBlock::AnthropicThinking { .. }
+                    | ContentBlock::OpenAIReasoning { .. }
+            )
+        });
+    }
 
-    for rendered in crate::session::render_messages(parent_session) {
+    for rendered in crate::session::render_messages(&visible_session) {
         match rendered.role.as_str() {
             "user" => {
                 if !rendered.content.trim().is_empty() {

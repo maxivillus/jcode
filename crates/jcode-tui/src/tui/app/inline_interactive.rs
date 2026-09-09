@@ -407,6 +407,7 @@ fn model_picker_route_is_current(
     route: &PickerOption,
     current_model: &str,
     current_provider: &str,
+    current_api_method: Option<&str>,
 ) -> bool {
     if model_name != current_model {
         return false;
@@ -418,9 +419,14 @@ fn model_picker_route_is_current(
     // and the current model would not preselect. Fall back to name-only
     // matching in that case.
     if current_provider.trim().eq_ignore_ascii_case("remote") {
-        return true;
+        return current_api_method
+            .map(|method| route.api_method.eq_ignore_ascii_case(method))
+            .unwrap_or(true);
     }
     jcode_provider_core::model_route_provider_labels_match(&route.provider, current_provider)
+        && current_api_method
+            .map(|method| route.api_method.eq_ignore_ascii_case(method))
+            .unwrap_or(true)
 }
 
 const RECOMMENDED_MODELS: &[&str] = &["gpt-5.5", "claude-opus-4-8"];
@@ -1138,7 +1144,18 @@ impl App {
             self.invalidate_model_picker_cache();
         }
 
-        if self.is_remote && self.remote_model_options.is_empty() {
+        // During remote startup the authoritative session catalog has not
+        // arrived yet. Do not make an old persisted catalog look current just
+        // because the user opened `/model` quickly after spawning the client.
+        let awaiting_initial_remote_catalog = self.is_remote
+            && self.remote_startup_phase.is_some()
+            && self.remote_model_options.is_empty()
+            && self.remote_available_entries.is_empty();
+
+        if self.is_remote
+            && !awaiting_initial_remote_catalog
+            && self.remote_model_options.is_empty()
+        {
             self.hydrate_remote_model_catalog_cache();
         }
 
@@ -1149,6 +1166,11 @@ impl App {
         } else {
             self.provider.model().to_string()
         };
+
+        if awaiting_initial_remote_catalog {
+            self.open_loading_model_picker(&current_model);
+            return;
+        }
 
         // Never present the old catalog as authoritative immediately after a
         // login/import. Local mode clears this when the provider's synchronous
@@ -1700,6 +1722,7 @@ impl App {
                                 route,
                                 &current_model,
                                 &current_provider,
+                                current_api_method.as_deref(),
                             );
                         entries.push(PickerEntry {
                             name: display_name.clone(),
@@ -1742,6 +1765,7 @@ impl App {
                         &route,
                         &current_model,
                         &current_provider,
+                        current_api_method.as_deref(),
                     );
                     let is_default = is_config_default(name, &route, None);
                     entries.push(PickerEntry {
@@ -3678,9 +3702,14 @@ impl App {
             }
             KeyCode::Char(c) => {
                 if let Some(ref mut picker) = self.inline_interactive_state
-                    && !c.is_whitespace()
+                    // Spaces separate independently matched search terms. The
+                    // token matcher already permits those terms to appear in
+                    // any order, so dropping whitespace here made that
+                    // capability impossible to use from the picker.
+                    && (!c.is_whitespace()
+                        || (!picker.filter.is_empty() && !picker.filter.ends_with(' ')))
                 {
-                    picker.filter.push(c);
+                    picker.filter.push(if c.is_whitespace() { ' ' } else { c });
                     Self::apply_inline_interactive_filter(picker);
                 }
             }
@@ -3995,12 +4024,35 @@ mod tests {
             &openai_route,
             "gpt-5.5",
             "OpenAI",
+            None,
         ));
         assert!(!model_picker_route_is_current(
             "gpt-5.5",
             &copilot_route,
             "gpt-5.5",
             "OpenAI",
+            None,
+        ));
+    }
+
+    #[test]
+    fn model_picker_current_route_requires_matching_api_method() {
+        let oauth_route = picker_option_with_method("Anthropic", "claude-oauth");
+        let api_key_route = picker_option_with_method("Anthropic", "claude-api");
+
+        assert!(!model_picker_route_is_current(
+            "claude-fable-5",
+            &oauth_route,
+            "claude-fable-5",
+            "Claude",
+            Some("claude-api"),
+        ));
+        assert!(model_picker_route_is_current(
+            "claude-fable-5",
+            &api_key_route,
+            "claude-fable-5",
+            "Claude",
+            Some("claude-api"),
         ));
     }
 

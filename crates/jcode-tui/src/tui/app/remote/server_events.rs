@@ -2,6 +2,7 @@ use super::*;
 use crate::tool::selfdev::ReloadContext;
 use crate::tui::TuiState;
 use crate::tui::app as app_mod;
+use crate::tui::app::remote::input_dispatch::restore_pending_startup_prompt_echo;
 use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
 
@@ -932,6 +933,50 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::Pong { .. } => false,
+        ServerEvent::State {
+            id,
+            session_id,
+            context_status,
+            ..
+        } => {
+            // Ответ State связан с явным запросом `/context status`. Отложенный
+            // ответ нельзя применять после нового запроса или смены сессии.
+            if app.pending_remote_context_status_request != Some(id) {
+                crate::logging::info(&format!(
+                    "Ignoring unrelated remote context State id={} pending={:?}",
+                    id, app.pending_remote_context_status_request
+                ));
+                return false;
+            }
+            app.pending_remote_context_status_request = None;
+            let active_session_id = app
+                .remote_session_id
+                .as_deref()
+                .unwrap_or(app.session.id.as_str());
+            if session_id != active_session_id {
+                crate::logging::info(&format!(
+                    "Ignoring stale remote context State id={} session={} active_session={}",
+                    id, session_id, active_session_id
+                ));
+                return false;
+            }
+
+            app.remote_context_status = context_status;
+            let mut report = format!(
+                "Status context удалённого provider\n\nSession id: {}\n",
+                session_id
+            );
+            report.push_str(&app_mod::state_ui::format_remote_context_status(
+                app.remote_context_status.as_ref(),
+            ));
+            app.push_display_message(DisplayMessage::system(report).with_title("Status context"));
+            if app.remote_context_status.is_some() {
+                app.set_status_notice("Status удалённого context обновлён");
+            } else {
+                app.set_status_notice("Status удалённого context недоступен");
+            }
+            true
+        }
         ServerEvent::ConnectionPhase { phase } => {
             let cp = match phase.as_str() {
                 "authenticating" => crate::message::ConnectionPhase::Authenticating,
@@ -1405,6 +1450,8 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::SessionId { session_id } => {
             remote.set_session_id(session_id.clone());
             app.remote_session_id = Some(session_id.clone());
+            app.remote_context_status = None;
+            app.pending_remote_context_status_request = None;
             crate::set_current_session(&session_id);
             app.note_client_focus(true);
             app.update_terminal_title();
@@ -1698,7 +1745,9 @@ pub(in crate::tui::app) fn handle_server_event(
             if session_changed || status_detail.is_some() {
                 app.status_detail = status_detail;
             }
-            app.remote_reasoning_effort = reasoning_effort;
+            if session_changed || reasoning_effort.is_some() {
+                app.remote_reasoning_effort = reasoning_effort;
+            }
             app.remote_service_tier = service_tier;
             app.remote_compaction_mode = Some(compaction_mode);
             app.set_side_panel_snapshot(side_panel);
@@ -1720,6 +1769,10 @@ pub(in crate::tui::app) fn handle_server_event(
             if catalog_outcome.catalog_changed {
                 app.persist_remote_model_catalog_cache();
             }
+            // `/model` may have been opened while the initial session catalog
+            // was still loading. Replace that loading row as soon as history
+            // supplies the authoritative snapshot.
+            app.refresh_open_model_picker_after_catalog_update();
             app.remote_skills = skills;
             app.invalidate_command_candidates_cache();
             app.remote_sessions = all_sessions;
@@ -1929,6 +1982,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     app.pending_images.clear();
                     app.set_status_notice("Reload complete - prompt preserved");
                 }
+                restore_pending_startup_prompt_echo(app);
                 app.note_runtime_memory_event_force("history_loaded", "remote_history_applied");
                 crate::process_memory::release_retained_heap("client_history_loaded");
                 if let Some(notice) = app.pending_remote_rewind_notice.take() {
@@ -2823,6 +2877,27 @@ pub(in crate::tui::app) fn handle_server_event(
             } else {
                 app.push_display_message(DisplayMessage::system(message));
                 app.set_status_notice("Compaction failed");
+            }
+            false
+        }
+        ServerEvent::ProviderResetResult {
+            message, success, ..
+        } => {
+            if success {
+                app.reset_provider_context_state();
+                if let Err(error) = app.session.save() {
+                    crate::logging::warn(&format!(
+                        "Не удалось сохранить local session после remote provider reset: {}",
+                        error
+                    ));
+                }
+                app.remote_context_status = None;
+                app.pending_remote_context_status_request = None;
+                app.push_display_message(DisplayMessage::system(message));
+                app.set_status_notice("Provider context сброшен");
+            } else {
+                app.push_display_message(DisplayMessage::error(message));
+                app.set_status_notice("Сброс provider context не выполнен");
             }
             false
         }

@@ -234,10 +234,9 @@ pub fn provider_model_to_select_after_auth_with_configured_default(
                 && route.model == configured
                 && route_matches_activation(route, activation)
         })
+        && selected_model.map(str::trim) != Some(configured)
     {
-        if selected_model.map(str::trim) != Some(configured) {
-            return Some(configured.to_string());
-        }
+        return Some(configured.to_string());
     }
 
     provider_model_to_select_after_auth(activation, selected_model, routes)
@@ -900,6 +899,7 @@ fn normalized_login_provider_id(provider_id: &str) -> Option<&'static str> {
         "copilot" => Some("copilot"),
         "gemini" => Some("gemini"),
         "antigravity" => Some("antigravity"),
+        "grok-build" => Some("grok-build"),
         _ => None,
     }
 }
@@ -921,6 +921,10 @@ pub fn provider_display_label(provider_id: Option<&str>) -> Option<String> {
 pub fn activate_auth_change(request: &AuthActivationRequest) -> AuthActivationResult {
     let provider_id = request.provider_id();
     sync_process_env_from_saved_credentials(request, provider_id.as_deref());
+    // The notification handler may have probed auth while the newly saved
+    // credential was not yet reflected in the process environment. Discard
+    // that snapshot after activation so catalog rebuilding sees the new auth.
+    super::AuthStatus::invalidate_cache();
     let provider_label = provider_display_label(provider_id.as_deref());
     let activated_model = apply_auth_provider_runtime(provider_id.as_deref());
     AuthActivationResult {
@@ -1183,6 +1187,7 @@ pub fn model_switch_request_for_provider_id(
         Some("copilot") => format!("copilot:{}", model),
         Some("gemini") => format!("gemini:{}", model),
         Some("antigravity") => format!("antigravity:{}", model),
+        Some("grok-build") => format!("grok-build:{}", model),
         _ => model.to_string(),
     }
 }
@@ -1261,6 +1266,29 @@ mod tests {
             .as_deref(),
             Some("fresh-login-key"),
             "credential resolution must use the freshly saved key"
+        );
+    }
+
+    #[test]
+    fn api_key_login_invalidates_auth_status_cached_before_activation() {
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+        assert_eq!(
+            crate::auth::AuthStatus::check_fast().openrouter,
+            crate::auth::AuthState::NotConfigured
+        );
+        sandbox
+            .write_env_file("openrouter.env", "OPENROUTER_API_KEY", "fresh-login-key")
+            .expect("write env file");
+
+        let mut auth = AuthChanged::new("openrouter");
+        auth.credential_source = Some(crate::protocol::AuthCredentialSource::ApiKeyFile);
+        auth.auth_method = Some(crate::protocol::AuthMethod::TuiPasteApiKey);
+        let _ = activate_auth_change(&AuthActivationRequest::new(None, Some(auth)));
+
+        assert_eq!(
+            crate::auth::AuthStatus::check_fast().openrouter,
+            crate::auth::AuthState::Available,
+            "catalog refresh must not reuse the pre-activation auth snapshot"
         );
     }
 
@@ -1447,6 +1475,7 @@ mod tests {
             ("copilot", "copilot", "copilot"),
             ("gemini", "gemini", "gemini"),
             ("antigravity", "antigravity", "antigravity"),
+            ("grok-build", "grok-build", "openrouter"),
         ] {
             crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
             crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
@@ -1514,6 +1543,9 @@ mod tests {
                 }
                 crate::provider_catalog::LoginProviderTarget::Antigravity => {
                     Some(("antigravity", "antigravity", "antigravity", "antigravity"))
+                }
+                crate::provider_catalog::LoginProviderTarget::GrokBuild => {
+                    Some(("grok-build", "grok-build", "openrouter", "grok-build"))
                 }
                 _ => None,
             }) else {
@@ -1593,6 +1625,7 @@ mod tests {
             "copilot",
             "gemini",
             "antigravity",
+            "grok-build",
         ] {
             assert!(
                 covered.contains(&expected),
@@ -1629,6 +1662,7 @@ mod tests {
             ("copilot", "copilot:shared-model"),
             ("gemini", "gemini:shared-model"),
             ("antigravity", "antigravity:shared-model"),
+            ("grok-build", "grok-build:shared-model"),
             ("cerebras", "cerebras:shared-model"),
         ] {
             assert_eq!(

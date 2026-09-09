@@ -94,6 +94,7 @@ mod shortcut_hints;
 mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
+mod update_sim;
 pub(crate) use state_ui_input_helpers::registered_command_entries;
 mod state_ui_maintenance;
 mod state_ui_messages;
@@ -1075,6 +1076,8 @@ pub struct App {
     /// simulator seeds synthetic phases so a developer can step through every
     /// first-run screen via Alt+5 reset or Cmd+5 toggle without touching real auth state.
     onboarding_sim: Option<usize>,
+    /// Active time-based, non-destructive update experience preview.
+    update_sim: Option<update_sim::UpdateSimulator>,
     /// Active guided first-run onboarding flow (model select -> continue ->
     /// transcript pick -> suggestions). `None` when not onboarding.
     onboarding_flow: Option<onboarding_flow::OnboardingFlow>,
@@ -1174,6 +1177,10 @@ pub struct App {
     remote_total_tokens: Option<(u64, u64)>,
     // Detailed persisted token/cache usage totals (from server in remote mode)
     remote_token_usage_totals: Option<crate::protocol::TokenUsageTotals>,
+    // Последний ответ сервера с агрегированными данными provider context.
+    remote_context_status: Option<crate::protocol::ContextStatusSnapshot>,
+    // Request ID текущего запроса свежего provider context status.
+    pending_remote_context_status_request: Option<u64>,
     // Whether the remote session is canary/self-dev (from server)
     remote_is_canary: Option<bool>,
     // Remote server version (from server)
@@ -1422,6 +1429,9 @@ pub struct App {
     // let `process_remote_followups` dispatch it, exactly like a staged startup
     // prompt.
     pending_prompt_before_history: Option<input::PreparedInput>,
+    /// User echo for a headed fork prompt sent before bootstrap History arrives.
+    /// History replaces the transcript, so the echo must be applied afterwards.
+    pending_startup_prompt_echo: Option<String>,
     // Pending account switch from inline picker (for remote mode async processing)
     pending_account_picker_action: Option<crate::tui::AccountPickerAction>,
     // Keybindings for model switching

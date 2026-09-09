@@ -30,16 +30,15 @@ pub mod linux {
     fn check_inner(pid: u32, strict: bool) -> StdinState {
         // First try /proc/PID/syscall (most accurate - shows exact syscall + fd)
         if let Ok(contents) = std::fs::read_to_string(format!("/proc/{}/syscall", pid)) {
-            // Format: "syscall_nr fd ..."
-            // read = 0 on x86_64, 63 on aarch64
-            // We want: read(0, ...) i.e. syscall read on fd 0 (stdin)
+            // Format: "syscall_nr fd ...". Some programs duplicate stdin to
+            // another fd before reading, so compare that descriptor with fd 0.
             let parts: Vec<&str> = contents.split_whitespace().collect();
             if parts.len() >= 2 {
                 let syscall_nr = parts[0];
                 let fd = parts[1];
                 // read syscall: 0 on x86_64, 63 on aarch64
                 let is_read = syscall_nr == "0" || syscall_nr == "63";
-                let is_stdin = fd == "0x0";
+                let is_stdin = fd == "0x0" || fd == "0" || read_fd_matches_stdin(pid, fd);
                 if is_read && is_stdin {
                     return StdinState::Reading;
                 }
@@ -69,6 +68,22 @@ pub mod linux {
         } else {
             StdinState::Unknown
         }
+    }
+
+    fn read_fd_matches_stdin(pid: u32, fd: &str) -> bool {
+        let fd_number = match fd.strip_prefix("0x") {
+            Some(value) => Result::ok(u32::from_str_radix(value, 16)),
+            None => Result::ok(fd.parse::<u32>()),
+        };
+        let Some(fd_number) = fd_number else {
+            return false;
+        };
+        let Ok(stdin_link) = std::fs::read_link(format!("/proc/{pid}/fd/0")) else {
+            return false;
+        };
+        std::fs::read_link(format!("/proc/{pid}/fd/{fd_number}"))
+            .map(|read_link| read_link == stdin_link)
+            .unwrap_or(false)
     }
 
     fn stdin_is_pipe_or_pty(pid: u32) -> bool {

@@ -199,6 +199,37 @@ fn test_rewind_undo_request_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_provider_reset_request_and_result_roundtrip() -> Result<()> {
+    let request = Request::ResetProvider { id: 12 };
+    let json = serde_json::to_string(&request)?;
+    assert!(json.contains("\"type\":\"reset_provider\""));
+    let decoded = parse_request_json(&json)?;
+    assert_eq!(decoded.id(), 12);
+    assert!(matches!(decoded, Request::ResetProvider { id: 12 }));
+
+    let event = ServerEvent::ProviderResetResult {
+        id: 12,
+        message: "reset".to_string(),
+        success: true,
+    };
+    let json = serde_json::to_string(&event)?;
+    assert!(json.contains("\"type\":\"provider_reset_result\""));
+    let decoded = parse_event_json(&json)?;
+    let ServerEvent::ProviderResetResult {
+        id,
+        message,
+        success,
+    } = decoded
+    else {
+        return Err(anyhow!("wrong provider reset event type"));
+    };
+    assert_eq!(id, 12);
+    assert_eq!(message, "reset");
+    assert!(success);
+    Ok(())
+}
+
+#[test]
 fn test_rename_session_request_roundtrip() -> Result<()> {
     let req = Request::RenameSession {
         id: 10,
@@ -245,6 +276,44 @@ fn test_event_roundtrip() -> Result<()> {
         return Err(anyhow!("wrong event type"));
     };
     assert_eq!(text, "hello");
+    Ok(())
+}
+
+#[test]
+fn test_state_context_status_roundtrip_and_legacy_decode() -> Result<()> {
+    let event = ServerEvent::State {
+        id: 13,
+        session_id: "sess_13".to_string(),
+        message_count: 4,
+        is_processing: false,
+        context_status: Some(ContextStatusSnapshot {
+            schema_version: 1,
+            revision: 8,
+            provider_generation: 3,
+            estimated_input_tokens: 512,
+            observed_input_tokens: Some(480),
+            fingerprint: "abc123".to_string(),
+        }),
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"context_status\""));
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::State {
+        id, context_status, ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong event type"));
+    };
+    assert_eq!(id, 13);
+    assert_eq!(context_status.unwrap().estimated_input_tokens, 512);
+
+    let legacy =
+        r#"{"type":"state","id":14,"session_id":"legacy","message_count":0,"is_processing":false}"#;
+    let decoded = parse_event_json(legacy)?;
+    let ServerEvent::State { context_status, .. } = decoded else {
+        return Err(anyhow!("wrong legacy event type"));
+    };
+    assert!(context_status.is_none());
     Ok(())
 }
 

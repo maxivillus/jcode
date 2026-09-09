@@ -1,6 +1,8 @@
 use super::*;
 #[path = "ui_messages_cache.rs"]
 mod cache_support;
+#[path = "ui_messages_todo_details.rs"]
+mod todo_details;
 use crate::message::{
     ParsedBackgroundTaskNotification, ParsedBackgroundTaskProgressNotification,
     parse_background_task_notification_markdown,
@@ -1117,7 +1119,13 @@ pub(crate) fn render_todos_message(
     let compact_details = inner_width < 72;
 
     let mut lines = Vec::new();
-    push_todo_plan_details(&mut lines, &plan, base_indent, inner_width, compact_details);
+    todo_details::push_todo_plan_details(
+        &mut lines,
+        &plan,
+        base_indent,
+        inner_width,
+        compact_details,
+    );
     if todos.is_empty() {
         lines.push(todo_card_line(
             vec![Span::styled(
@@ -1433,104 +1441,6 @@ fn wrap_todo_detail(value: &str, width: usize) -> Vec<String> {
         chunks.push(current);
     }
     chunks
-}
-
-/// Plan-level assessment lines shown once above the todo groups.
-fn push_todo_plan_details(
-    lines: &mut Vec<Line<'static>>,
-    plan: &crate::todo::TodoPlan,
-    base_indent: &str,
-    inner_width: usize,
-    compact_details: bool,
-) {
-    let intention = plan
-        .user_intention
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if let Some(state) = plan.understands_user_intent {
-        let state_color = match state {
-            crate::todo::IntentUnderstanding::Uncertain => todo_failure_color(),
-            crate::todo::IntentUnderstanding::Partial => todo_warning_color(),
-            crate::todo::IntentUnderstanding::Clear
-            | crate::todo::IntentUnderstanding::Complete => todo_score_color(),
-        };
-        let mut spans = vec![
-            Span::styled("Intent ", Style::default().fg(todo_label_color())),
-            Span::styled(state.as_str().to_string(), Style::default().fg(state_color)),
-            Span::styled(": ", Style::default().fg(todo_label_color())),
-        ];
-        if let Some(intention) = intention {
-            spans.push(Span::styled(
-                intention.to_string(),
-                Style::default().fg(todo_meta_color()),
-            ));
-        }
-        lines.push(todo_card_line(spans, base_indent, inner_width));
-    } else if let Some(intention) = intention {
-        push_todo_detail(
-            lines,
-            "Intent",
-            intention,
-            base_indent,
-            inner_width,
-            compact_details,
-        );
-    }
-}
-
-fn push_todo_detail(
-    lines: &mut Vec<Line<'static>>,
-    label: &str,
-    value: &str,
-    base_indent: &str,
-    inner_width: usize,
-    compact: bool,
-) {
-    if !compact {
-        push_todo_wrapped_detail(lines, label, value, base_indent, inner_width);
-        return;
-    }
-
-    let prefix = format!("  {} · ", label);
-    lines.push(todo_card_line(
-        vec![
-            Span::styled(prefix, Style::default().fg(todo_label_color())),
-            Span::styled(value.to_string(), Style::default().fg(todo_meta_color())),
-        ],
-        base_indent,
-        inner_width,
-    ));
-}
-
-/// Wrap one labeled detail line to the card width.
-fn push_todo_wrapped_detail(
-    lines: &mut Vec<Line<'static>>,
-    label: &str,
-    value: &str,
-    base_indent: &str,
-    inner_width: usize,
-) {
-    let prefix = format!("  {} · ", label);
-    let prefix_width = prefix.width();
-    let available = inner_width.saturating_sub(prefix_width).max(1);
-    for (index, chunk) in wrap_todo_detail(value, available).into_iter().enumerate() {
-        lines.push(todo_card_line(
-            vec![
-                Span::styled(
-                    if index == 0 {
-                        prefix.clone()
-                    } else {
-                        " ".repeat(prefix_width)
-                    },
-                    Style::default().fg(todo_label_color()),
-                ),
-                Span::styled(chunk, Style::default().fg(todo_meta_color())),
-            ],
-            base_indent,
-            inner_width,
-        ));
-    }
 }
 
 fn push_todo_goal_details(

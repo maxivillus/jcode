@@ -353,6 +353,7 @@ impl RemoteConnection {
             client_instance_id: conn.client_instance_id.clone(),
             client_has_local_history,
             allow_session_takeover,
+            crash_on_disconnect: false,
             terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
         })
         .await?;
@@ -613,6 +614,18 @@ impl RemoteConnection {
         let id = self.next_request_id;
         self.next_request_id += 1;
         self.send_request(Request::GetHistory { id }).await?;
+        Ok(id)
+    }
+
+    /// Запросить свежий агрегированный status provider context.
+    ///
+    /// Ответ приходит через обычный event loop. Этот метод только отправляет
+    /// request и не читает socket напрямую, чтобы не конфликтовать с
+    /// `next_event`.
+    pub async fn request_state(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::GetState { id }).await?;
         Ok(id)
     }
 
@@ -947,6 +960,15 @@ impl RemoteConnection {
     pub async fn compact(&mut self) -> Result<u64> {
         let id = self.next_request_id;
         let request = Request::Compact { id };
+        self.next_request_id += 1;
+        self.send_request(request).await?;
+        Ok(id)
+    }
+
+    /// Сбросить provider context без изменения transcript.
+    pub async fn reset_provider(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        let request = Request::ResetProvider { id };
         self.next_request_id += 1;
         self.send_request(request).await?;
         Ok(id)
@@ -1291,6 +1313,11 @@ impl RemoteConnection {
     #[cfg(test)]
     pub(crate) fn take_dummy_peer(&mut self) -> Option<Stream> {
         self._dummy_peer.take()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next_request_id_for_test(&self) -> u64 {
+        self.next_request_id
     }
 
     /// Set session ID
@@ -1641,6 +1668,34 @@ mod tests {
         assert!(matches!(
             serde_json::from_str::<Request>(&line).expect("clear request should deserialize"),
             Request::Clear { id: 1 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn request_state_sends_get_state_request_to_remote_server() {
+        let mut remote = RemoteConnection::dummy();
+        let peer = remote
+            ._dummy_peer
+            .take()
+            .expect("dummy remote should retain peer stream");
+        let (reader, _writer) = peer.into_split();
+        let mut reader = BufReader::new(reader);
+
+        let request_id = remote
+            .request_state()
+            .await
+            .expect("state request should send");
+
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .expect("state request should be readable by peer");
+        assert_eq!(request_id, 1);
+        assert_eq!(remote.next_request_id, 2);
+        assert!(matches!(
+            serde_json::from_str::<Request>(&line).expect("state request should deserialize"),
+            Request::GetState { id: 1 }
         ));
     }
 

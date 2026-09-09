@@ -7,9 +7,13 @@ use jcode_harness_api::{
 };
 use rusqlite::{Connection, params};
 use serde::Deserialize;
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{
+    Mutex, MutexGuard, OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Default number of messages a `peek_session` returns. A preview is a glance,
@@ -36,6 +40,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "compact",
     "rename_session",
     "get_runtime_info",
+    "fork_session",
     "read_file",
     "find_files",
     "search_text",
@@ -82,13 +87,19 @@ pub enum Outbound {
 type SessionFileStatus = (bool, String, Option<u64>, Option<u64>);
 type SessionFileStatusResult = Result<SessionFileStatus, (ErrorCode, String)>;
 
+// Legacy daemon replies are broadcast to every connected client. Request ids
+// must therefore be unique across bridge connections, not merely within one
+// `BridgeState`, or two panels issuing the same numbered request can each
+// mistake the other's reply for their own.
+static NEXT_LEGACY_ID: AtomicU64 = AtomicU64::new(1);
+
 /// Per-connection translation state.
 #[derive(Debug, Default)]
 pub struct BridgeState {
+    /// Whether an unannounced transport loss should crash the attached session.
+    pub crash_on_disconnect: bool,
     /// Session id assigned by the daemon for this connection.
     pub session_id: Option<String>,
-    /// Next id to use on the legacy connection.
-    next_legacy_id: u64,
     /// Legacy id of the in-flight `message` request, so `done` maps to
     /// `turn_done`.
     pending_message_id: Option<u64>,
@@ -96,7 +107,9 @@ pub struct BridgeState {
     /// event is a request reply, not a model turn boundary.
     pending_no_reply_message_id: Option<(u64, u64)>,
     /// Legacy id of an in-flight `create/attach` subscribe.
-    pending_attach_id: Option<(u64, u64)>,
+    pending_attach_id: Option<(u64, u64, Option<String>)>,
+    /// Legacy and API ids for an in-flight session fork.
+    pending_fork_id: Option<(u64, u64)>,
     /// Legacy id of the unsolicited model-catalog probe sent after attach. Its
     /// reply becomes a `model_info` event rather than a request reply, so it is
     /// tracked apart from `pending_simple`.
@@ -129,6 +142,15 @@ pub struct BridgeState {
     available_routes: Vec<ModelRouteInfo>,
 }
 
+impl BridgeState {
+    pub fn with_crash_on_disconnect(crash_on_disconnect: bool) -> Self {
+        Self {
+            crash_on_disconnect,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct ArchiveState {
     sessions: BTreeMap<String, u64>,
@@ -150,6 +172,12 @@ struct PersistedSessionMetadata {
     custom_title: Option<String>,
     #[serde(default)]
     todo_title: Option<String>,
+    #[serde(default)]
+    saved: bool,
+    #[serde(skip)]
+    updated_at_ms: Option<i64>,
+    #[serde(skip)]
+    last_active_at_ms: Option<i64>,
 }
 
 impl PersistedSessionMetadata {
@@ -174,6 +202,7 @@ struct RecentSessionIndexEntry {
     generated_title: Option<String>,
     custom_title: Option<String>,
     todo_title: Option<String>,
+    saved: bool,
     updated_at_ms: i64,
     last_active_at_ms: Option<i64>,
 }
@@ -185,6 +214,9 @@ impl From<&RecentSessionIndexEntry> for PersistedSessionMetadata {
             title: entry.generated_title.clone(),
             custom_title: entry.custom_title.clone(),
             todo_title: entry.todo_title.clone(),
+            saved: entry.saved,
+            updated_at_ms: Some(entry.updated_at_ms),
+            last_active_at_ms: entry.last_active_at_ms,
         }
     }
 }
@@ -210,8 +242,7 @@ enum SimpleKind {
 
 impl BridgeState {
     fn legacy_id(&mut self) -> u64 {
-        self.next_legacy_id += 1;
-        self.next_legacy_id
+        NEXT_LEGACY_ID.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Translate one API request (raw JSON) into outbound actions.
@@ -336,7 +367,10 @@ impl BridgeState {
                 let id = self.legacy_id();
                 let state_id = self.legacy_id();
                 let catalog_id = self.legacy_id();
-                self.pending_attach_id = Some((state_id, api_id));
+                let requested_session = (req == "attach_session")
+                    .then(|| request["session_id"].as_str().map(str::to_string))
+                    .flatten();
+                self.pending_attach_id = Some((state_id, api_id, requested_session));
                 self.pending_model_probe = Some(catalog_id);
                 let working_dir =
                     request["working_dir"]
@@ -352,6 +386,9 @@ impl BridgeState {
                     "id": id,
                     "working_dir": working_dir,
                 });
+                if self.crash_on_disconnect {
+                    subscribe["crash_on_disconnect"] = json!(true);
+                }
                 // Sessions rooted inside a jcode checkout are self-dev
                 // sessions: the daemon only enables the self-dev tools and
                 // prompt when the subscribe says so, and a client that opens
@@ -400,6 +437,11 @@ impl BridgeState {
                     message["images"] = json!(images);
                 }
                 vec![Outbound::Legacy(message)]
+            }
+            "fork_session" => {
+                let id = self.legacy_id();
+                self.pending_fork_id = Some((id, api_id));
+                vec![Outbound::Legacy(json!({"type": "split", "id": id}))]
             }
             "cancel" => {
                 let id = self.legacy_id();
@@ -551,6 +593,16 @@ impl BridgeState {
                             "idle".into()
                         },
                         transcript_bytes: Self::transcript_bytes(&session_id),
+                        saved: metadata.get(&session_id).is_some_and(|value| value.saved),
+                        updated_at_ms: metadata
+                            .get(&session_id)
+                            .and_then(|value| value.updated_at_ms)
+                            .or_else(|| {
+                                Self::session_modified_ms(&session_id).map(|value| value as i64)
+                            }),
+                        last_active_at_ms: metadata
+                            .get(&session_id)
+                            .and_then(|value| value.last_active_at_ms),
                         archived: archive.sessions.contains_key(&session_id),
                         archived_at_ms: archive.sessions.get(&session_id).copied(),
                         session_id,
@@ -796,7 +848,13 @@ impl BridgeState {
                     json!({"type": "cancel_soft_interrupts", "id": id}),
                 )]
             }
-            "detach_session" => vec![Outbound::Reply(ServerFrame::reply(api_id, ApiEvent::Ok))],
+            "detach_session" => {
+                let id = self.legacy_id();
+                vec![
+                    Outbound::Legacy(json!({"type": "prepare_disconnect", "id": id})),
+                    Outbound::Reply(ServerFrame::reply(api_id, ApiEvent::Ok)),
+                ]
+            }
             "permission_response" => {
                 // The legacy protocol does not surface permission prompts on
                 // this path, so the bridge never emits `permission_request`
@@ -831,7 +889,13 @@ impl BridgeState {
         match kind {
             "session" => {
                 let session_id = event["session_id"].as_str().unwrap_or("").to_string();
-                self.session_id = Some(session_id.clone());
+                // `session` is a broadcast lifecycle notification. The daemon
+                // sends it for other live sessions too, so it cannot identify
+                // which session this connection is attached to. Attachment
+                // identity comes from the correlated `state` reply below.
+                // Treating this broadcast as connection state made a panel for
+                // session A start rejecting its own commands after session B
+                // announced itself.
                 vec![ServerFrame::event(ApiEvent::SessionStatus {
                     session_id,
                     status: "attached".into(),
@@ -839,20 +903,40 @@ impl BridgeState {
             }
             "state" => {
                 let session_id = event["session_id"].as_str().unwrap_or("").to_string();
-                if !session_id.is_empty() {
-                    self.session_id = Some(session_id.clone());
-                }
                 let id = event["id"].as_u64().unwrap_or(0);
-                if let Some((state_id, api_id)) = self.pending_attach_id
-                    && state_id == id
+                if let Some((state_id, api_id, requested_session)) = &self.pending_attach_id
+                    && *state_id == id
+                    && requested_session
+                        .as_deref()
+                        .is_none_or(|requested| requested == session_id)
                 {
+                    let api_id = *api_id;
                     self.pending_attach_id = None;
+                    // `state` snapshots can also be broadcast for other live
+                    // sessions. Only the reply correlated with this connection's
+                    // attach request establishes its identity. Otherwise opening
+                    // a second panel can retarget the first panel's bridge and
+                    // make its next command fail with a wrong-session error.
+                    if !session_id.is_empty() {
+                        self.session_id = Some(session_id.clone());
+                    }
                     let metadata = Self::resolve_session_metadata(&session_id);
                     return vec![ServerFrame::reply(
                         api_id,
                         ApiEvent::Attached {
                             session: SessionInfo {
                                 transcript_bytes: Self::transcript_bytes(&session_id),
+                                saved: metadata.as_ref().is_some_and(|value| value.saved),
+                                updated_at_ms: metadata
+                                    .as_ref()
+                                    .and_then(|value| value.updated_at_ms)
+                                    .or_else(|| {
+                                        Self::session_modified_ms(&session_id)
+                                            .map(|value| value as i64)
+                                    }),
+                                last_active_at_ms: metadata
+                                    .as_ref()
+                                    .and_then(|value| value.last_active_at_ms),
                                 session_id,
                                 working_dir: metadata
                                     .as_ref()
@@ -937,6 +1021,14 @@ impl BridgeState {
                     vec![]
                 }
             }
+            "wake_requested" => vec![ServerFrame::event(ApiEvent::WakeRequested {
+                session_id: event["session_id"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| session(self)),
+                reason: event["reason"].as_str().unwrap_or("").to_string(),
+                notification: event["notification"].as_str().unwrap_or("").to_string(),
+            })],
             "context_message_added" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 if self
@@ -948,6 +1040,50 @@ impl BridgeState {
                 } else {
                     vec![]
                 }
+            }
+            "split_response" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some((_, api_id)) = self
+                    .pending_fork_id
+                    .take()
+                    .filter(|(legacy_id, _)| *legacy_id == id)
+                else {
+                    return vec![];
+                };
+                let session_id = event["new_session_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let metadata = Self::resolve_session_metadata(&session_id);
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::SessionForked {
+                        session: SessionInfo {
+                            transcript_bytes: Self::transcript_bytes(&session_id),
+                            saved: metadata.as_ref().is_some_and(|value| value.saved),
+                            updated_at_ms: Self::session_modified_ms(&session_id)
+                                .map(|value| value as i64),
+                            last_active_at_ms: metadata
+                                .as_ref()
+                                .and_then(|value| value.last_active_at_ms),
+                            session_id,
+                            working_dir: metadata
+                                .as_ref()
+                                .and_then(|value| value.working_dir.clone()),
+                            title: event["new_session_name"]
+                                .as_str()
+                                .map(str::to_string)
+                                .or_else(|| {
+                                    metadata
+                                        .as_ref()
+                                        .and_then(PersistedSessionMetadata::display_title)
+                                }),
+                            status: "idle".into(),
+                            archived: false,
+                            archived_at_ms: None,
+                        },
+                    },
+                )]
             }
             "pong" => self
                 .take_simple(event["id"].as_u64().unwrap_or(0), SimpleKind::Ping)
@@ -1196,8 +1332,15 @@ impl BridgeState {
                 if no_reply_api_id.is_some() {
                     self.pending_no_reply_message_id = None;
                 }
+                let fork_api_id = self
+                    .pending_fork_id
+                    .filter(|(legacy_id, _)| *legacy_id == id)
+                    .map(|(_, api_id)| api_id);
+                if fork_api_id.is_some() {
+                    self.pending_fork_id = None;
+                }
                 // Route to a pending request when possible, else stream it.
-                let reply_to = no_reply_api_id.or_else(|| {
+                let reply_to = no_reply_api_id.or(fork_api_id).or_else(|| {
                     self.pending_simple
                         .iter()
                         .position(|(legacy_id, _, _)| *legacy_id == id)
@@ -1350,6 +1493,11 @@ impl BridgeState {
             custom_title: Self::metadata_string(&tail, "custom_title", true)
                 .or_else(|| Self::metadata_string(&head, "custom_title", true)),
             todo_title: None,
+            saved: Self::metadata_bool(&tail, "saved", true)
+                .or_else(|| Self::metadata_bool(&head, "saved", false))
+                .unwrap_or(false),
+            updated_at_ms: None,
+            last_active_at_ms: None,
             working_dir: Self::metadata_string(&tail, "working_dir", true)
                 .or_else(|| Self::metadata_string(&head, "working_dir", true)),
         })
@@ -1361,10 +1509,28 @@ impl BridgeState {
             .windows(needle.len())
             .enumerate()
             .filter_map(|(at, window)| (window == needle.as_bytes()).then_some(at + needle.len()));
-        let start = if last { starts.last()? } else { starts.next()? };
+        let start = if last {
+            starts.next_back()?
+        } else {
+            starts.next()?
+        };
         Option::<String>::deserialize(&mut serde_json::Deserializer::from_slice(&bytes[start..]))
             .ok()
             .flatten()
+    }
+
+    fn metadata_bool(bytes: &[u8], field: &str, last: bool) -> Option<bool> {
+        let needle = format!("\"{field}\":");
+        let mut starts = bytes
+            .windows(needle.len())
+            .enumerate()
+            .filter_map(|(at, window)| (window == needle.as_bytes()).then_some(at + needle.len()));
+        let start = if last {
+            starts.next_back()?
+        } else {
+            starts.next()?
+        };
+        bool::deserialize(&mut serde_json::Deserializer::from_slice(&bytes[start..])).ok()
     }
 
     fn resolve_working_dir(session_id: &str) -> Option<String> {
@@ -1431,7 +1597,8 @@ impl BridgeState {
                      custom_title TEXT,
                      todo_title TEXT,
                      updated_at_ms INTEGER NOT NULL,
-                     last_active_at_ms INTEGER
+                     last_active_at_ms INTEGER,
+                     saved INTEGER NOT NULL DEFAULT 0
                  );
                  CREATE INDEX IF NOT EXISTS recent_sessions_activity
                  ON recent_sessions(COALESCE(last_active_at_ms, updated_at_ms) DESC);",
@@ -1440,9 +1607,13 @@ impl BridgeState {
         {
             return Vec::new();
         }
+        let _ = connection.execute(
+            "ALTER TABLE recent_sessions ADD COLUMN saved INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         let Ok(mut statement) = connection.prepare(
             "SELECT session_id, working_dir, generated_title, custom_title,
-                    todo_title, updated_at_ms, last_active_at_ms
+                    todo_title, saved, updated_at_ms, last_active_at_ms
              FROM recent_sessions
              ORDER BY COALESCE(last_active_at_ms, updated_at_ms) DESC
              LIMIT 500",
@@ -1457,8 +1628,9 @@ impl BridgeState {
                     generated_title: row.get(2)?,
                     custom_title: row.get(3)?,
                     todo_title: row.get(4)?,
-                    updated_at_ms: row.get(5)?,
-                    last_active_at_ms: row.get(6)?,
+                    saved: row.get(5)?,
+                    updated_at_ms: row.get(6)?,
+                    last_active_at_ms: row.get(7)?,
                 })
             })
             .and_then(|rows| rows.collect())
@@ -1555,7 +1727,7 @@ impl BridgeState {
                 .flat_map(|handle| handle.join().unwrap_or_default())
                 .collect::<Vec<_>>()
         });
-        ids.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+        ids.sort_unstable_by_key(|(modified, _)| Reverse(*modified));
         Self::write_bootstrap_recent_session_index(&ids);
         if let Some(limit) = limit {
             ids.truncate(limit);

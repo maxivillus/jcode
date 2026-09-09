@@ -1068,6 +1068,27 @@ pub(super) fn handle_compact(
     });
 }
 
+pub(super) fn handle_reset_provider(
+    id: u64,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let agent = Arc::clone(agent);
+    let tx = client_event_tx.clone();
+    tokio::spawn(async move {
+        let mut agent_guard = agent.lock().await;
+        agent_guard.reset_provider_session();
+        drop(agent_guard);
+
+        let _ = tx.send(ServerEvent::ProviderResetResult {
+            id,
+            message: "Provider context сброшен. Следующий turn отправит текущий context заново."
+                .to_string(),
+            success: true,
+        });
+    });
+}
+
 pub(super) async fn handle_stdin_response(
     id: u64,
     request_id: String,

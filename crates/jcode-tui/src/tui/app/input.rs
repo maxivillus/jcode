@@ -1543,7 +1543,7 @@ impl App {
             self.stop_auto_continuation_after_guardrail();
             return false;
         }
-        self.schedule_auto_poke_followup_if_needed()
+        self.schedule_auto_poke_followup_if_needed(true)
             || self.schedule_overnight_poke_followup_if_needed()
     }
 
@@ -1593,7 +1593,7 @@ impl App {
         true
     }
 
-    pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
+    pub(super) fn schedule_auto_poke_followup_if_needed(&mut self, final_response: bool) -> bool {
         if !self.auto_poke_incomplete_todos
             || self.pending_queued_dispatch
             || self.pending_turn
@@ -1723,11 +1723,11 @@ impl App {
             // it stays armed so the next batch of work is covered too; only an
             // explicit /poke off (or a circuit breaker above) disarms it.
             self.auto_poke_incomplete_todos = self.auto_poke_default_on;
-            // A finished cycle re-arms the review for whatever work comes next;
-            // without this a session could only ever deliver one digest.
+            // A finished cycle re-arms review for the next batch of work.
             self.todo_gate_digest_delivered = false;
             self.todo_completion_gate_attempts = 0;
-            if !self.todo_final_response_requested {
+            self.todo_confidence_spike_challenged &= final_response;
+            if !self.todo_final_response_requested && final_response {
                 self.todo_final_response_requested = true;
                 self.push_display_message(DisplayMessage::system(format!(
                     "✅ All todos done. Completion confidence: {}.",
@@ -2902,6 +2902,9 @@ impl App {
         // Alt+5 always starts the onboarding simulator from a pristine first
         // screen, even when another modal or a previous sim screen is active.
         if self.handle_onboarding_sim_reset_shortcut(code, modifiers) {
+            return Ok(());
+        }
+        if self.handle_update_sim_shortcut(code, modifiers) {
             return Ok(());
         }
 

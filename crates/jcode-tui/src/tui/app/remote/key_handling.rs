@@ -278,6 +278,9 @@ async fn handle_remote_key_internal(
     if app.handle_onboarding_sim_reset_shortcut(code, modifiers) {
         return Ok(());
     }
+    if app.handle_update_sim_shortcut(code, modifiers) {
+        return Ok(());
+    }
 
     // The onboarding simulator owns all key handling while active (and Cmd+5
     // toggles it). Handle it first so no real onboarding action can leak through.
@@ -1063,21 +1066,88 @@ async fn handle_remote_key_internal(
                 }
 
                 if trimmed == "/model" || trimmed == "/models" {
-                    let _ = remote.refresh_models().await;
-                    // `refresh_models` re-queries providers and pushes the
-                    // result over the bus, where oversized frames get
-                    // downgraded to names-only. Also request the catalog
-                    // directly so the picker gets real route expansion even
-                    // when the bus push is downgraded and no usable local
-                    // catalog cache exists (otherwise every row is a
-                    // placeholder "remote-catalog" entry).
-                    let _ = remote.request_model_catalog().await;
-                    app.set_status_notice("Refreshing model catalog...");
+                    // Opening the picker is a read-only UI action. The session
+                    // bootstrap and explicit `/model refresh` command own
+                    // catalog I/O; doing it here races startup and briefly
+                    // replaces the session catalog with remote fallback rows.
                     app.open_model_picker();
                     return Ok(());
                 }
 
                 if app_mod::commands::handle_usage_command(app, trimmed) {
+                    return Ok(());
+                }
+
+                if trimmed == "/context refresh" {
+                    app.remote_context_status = None;
+                    app.pending_remote_context_status_request = None;
+                    app.push_display_message(DisplayMessage::system(
+                        "Запрашиваю свежий status удалённого context...".to_string(),
+                    ));
+                    match remote.request_state().await {
+                        Ok(request_id) => {
+                            app.pending_remote_context_status_request = Some(request_id);
+                            app.set_status_notice("Запрашиваю свежий status удалённого context...");
+                        }
+                        Err(error) => {
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Не удалось обновить status удалённого context: {}",
+                                error
+                            )));
+                            app.set_status_notice(
+                                "Обновление status удалённого context не выполнено",
+                            );
+                        }
+                    }
+                    return Ok(());
+                }
+
+                if trimmed == "/context compact" {
+                    app.push_display_message(DisplayMessage::system(
+                        "Запрашиваю compact удалённого context...".to_string(),
+                    ));
+                    remote.compact().await?;
+                    return Ok(());
+                }
+
+                if trimmed == "/context reset-provider" {
+                    app.remote_context_status = None;
+                    app.pending_remote_context_status_request = None;
+                    app.push_display_message(DisplayMessage::system(
+                        "Запрашиваю сброс provider context на удалённом server...".to_string(),
+                    ));
+                    remote.reset_provider().await?;
+                    return Ok(());
+                }
+
+                if trimmed == "/context" || trimmed.starts_with("/context ") {
+                    if trimmed == "/context" || trimmed == "/context status" {
+                        // Не показываем старый server snapshot перед новым
+                        // запросом. Полный локальный отчёт остаётся доступен,
+                        // а свежие server данные придут отдельным событием.
+                        app.remote_context_status = None;
+                        app.pending_remote_context_status_request = None;
+                        app_mod::state_ui::handle_info_command(app, trimmed);
+                        match remote.request_state().await {
+                            Ok(request_id) => {
+                                app.pending_remote_context_status_request = Some(request_id);
+                                app.set_status_notice("Запрашиваю status удалённого context...");
+                            }
+                            Err(error) => {
+                                app.push_display_message(DisplayMessage::error(format!(
+                                    "Не удалось запросить status удалённого context: {}",
+                                    error
+                                )));
+                                app.set_status_notice(
+                                    "Запрос status удалённого context не выполнен",
+                                );
+                            }
+                        }
+                    } else {
+                        // Snapshot остаётся локальным redacted metadata-файлом.
+                        // Он не должен незаметно выдавать устаревший server state.
+                        app_mod::state_ui::handle_info_command(app, trimmed);
+                    }
                     return Ok(());
                 }
 

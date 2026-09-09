@@ -1,9 +1,9 @@
 use super::available_models_dedup::available_models_dedup_key;
 use super::client_actions::{
     AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
-    handle_notify_session, handle_rename_session, handle_run_subagent, handle_set_feature,
-    handle_set_subagent_model, handle_split, handle_stdin_response, handle_transfer,
-    handle_trigger_memory_extraction,
+    handle_notify_session, handle_rename_session, handle_reset_provider, handle_run_subagent,
+    handle_set_feature, handle_set_subagent_model, handle_split, handle_stdin_response,
+    handle_transfer, handle_trigger_memory_extraction,
 };
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
@@ -480,6 +480,7 @@ pub(super) async fn handle_client(
 
     // Per-client state
     let mut client_is_processing = false;
+    let mut crash_on_disconnect = false;
     let (processing_done_tx, mut processing_done_rx) =
         mpsc::unbounded_channel::<(u64, Result<()>, Option<String>)>();
     let mut processing_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -1388,11 +1389,21 @@ pub(super) async fn handle_client(
                 }
             }
 
+            Request::PrepareDisconnect { id } => {
+                crash_on_disconnect = false;
+                let json = encode_event(&ServerEvent::Done { id });
+                let mut w = writer.lock().await;
+                if w.write_all(json.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+
             Request::GetState { id } => {
                 if handle_get_state(
                     id,
                     &client_session_id,
                     client_is_processing,
+                    &agent,
                     &sessions,
                     &writer,
                 )
@@ -1411,8 +1422,10 @@ pub(super) async fn handle_client(
                 client_instance_id,
                 client_has_local_history,
                 allow_session_takeover,
+                crash_on_disconnect: requested_crash_on_disconnect,
                 terminal_env,
             } => {
+                crash_on_disconnect = requested_crash_on_disconnect;
                 if let Err(message) =
                     required_subscribe_working_dir(subscribe_working_dir.as_deref())
                 {
@@ -1436,7 +1449,16 @@ pub(super) async fn handle_client(
                     }
                 }
                 if let Some(target_session_id) = target_session_id {
-                    if crate::session::session_exists(&target_session_id) {
+                    // A brand-new desktop panel has no transcript on disk until
+                    // its first prompt. Its creator connection can detach before
+                    // the panel connection arrives, while the live agent is
+                    // already registered in memory. Treat that as an existing
+                    // session or the target-aware subscribe silently creates a
+                    // different session and every subsequent command reports a
+                    // wrong-session attachment.
+                    if crate::session::session_exists(&target_session_id)
+                        || sessions.read().await.contains_key(&target_session_id)
+                    {
                         let pre_resume_session_id = client_session_id.clone();
                         agent = crate::hooks::with_client_terminal_env(
                             active_terminal_env.clone(),
@@ -1937,6 +1959,20 @@ pub(super) async fn handle_client(
                 handle_compact(id, &agent, &client_event_tx);
             }
 
+            Request::ResetProvider { id } => {
+                if reject_if_agent_busy_for_request(
+                    id,
+                    "reset_provider",
+                    &client_session_id,
+                    client_is_processing,
+                    &agent,
+                    &client_event_tx,
+                ) {
+                    continue;
+                }
+                handle_reset_provider(id, &agent, &client_event_tx);
+            }
+
             Request::TriggerMemoryExtraction { id } => {
                 if reject_if_agent_busy_for_request(
                     id,
@@ -2344,7 +2380,6 @@ pub(super) async fn handle_client(
                 initial_message,
                 request_nonce,
                 spawn_mode,
-                model,
                 effort,
                 label,
             } => {
@@ -2359,7 +2394,6 @@ pub(super) async fn handle_client(
                     initial_message,
                     request_nonce,
                     spawn_mode,
-                    model,
                     effort,
                     label,
                     &client_event_tx,
@@ -2613,7 +2647,6 @@ pub(super) async fn handle_client(
                 prefer_spawn,
                 spawn_if_needed,
                 message,
-                model,
                 effort,
             } => {
                 handle_comm_assign_next(
@@ -2624,7 +2657,6 @@ pub(super) async fn handle_client(
                     prefer_spawn,
                     spawn_if_needed,
                     message,
-                    model,
                     effort,
                     &client_event_tx,
                     &sessions,
@@ -2782,6 +2814,7 @@ pub(super) async fn handle_client(
             &sessions,
             &client_session_id,
             client_is_processing,
+            crash_on_disconnect,
             &mut processing_task,
             event_handle,
             &swarm_members,

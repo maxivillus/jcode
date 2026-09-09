@@ -160,7 +160,7 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
         // re-arming; this test is about the spike-challenge flag, not the
         // default-on re-arm behavior.
         reloaded_app.auto_poke_default_on = false;
-        assert!(!reloaded_app.schedule_auto_poke_followup_if_needed());
+        assert!(!reloaded_app.schedule_auto_poke_followup_if_needed(false));
         assert!(!reloaded_app.auto_poke_incomplete_todos);
         assert!(!reloaded_app.todo_confidence_spike_challenged);
         assert!(reloaded_app.hidden_queued_system_messages.is_empty());
@@ -195,7 +195,7 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
         // the model made no todo progress).
         for attempt in 0..App::TODO_COMPLETION_GATE_MAX_ATTEMPTS {
             assert!(
-                app.schedule_auto_poke_followup_if_needed(),
+                app.schedule_auto_poke_followup_if_needed(false),
                 "attempt {attempt} should still schedule a gate nudge"
             );
             app.queued_messages.clear();
@@ -205,7 +205,7 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
         // Budget exhausted: the gate must stop scheduling and disarm auto-poke
         // instead of looping forever (observed live as one API call per ~5s).
         assert!(
-            !app.schedule_auto_poke_followup_if_needed(),
+            !app.schedule_auto_poke_followup_if_needed(false),
             "exhausted gate must not schedule another nudge"
         );
         assert!(!app.auto_poke_incomplete_todos);
@@ -255,7 +255,7 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
         )
         .expect("save low-ownership goal");
 
-        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert!(app.schedule_auto_poke_followup_if_needed(false));
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages.len(), 1);
         assert!(app.queued_messages[0].contains("complete workflow"));
@@ -304,7 +304,7 @@ fn remote_ownership_gate_reads_the_remote_goal_assessment() {
         )
         .expect("save remote goal assessment");
 
-        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(!app.schedule_auto_poke_followup_if_needed(false));
         assert!(app.queued_messages.is_empty());
     });
 }
@@ -514,7 +514,7 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
         .expect("record observation");
 
         assert!(
-            app.schedule_auto_poke_followup_if_needed(),
+            app.schedule_auto_poke_followup_if_needed(false),
             "an unresolved review point should schedule the digest"
         );
         let digest = app
@@ -535,7 +535,7 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         assert!(
-            !app.schedule_auto_poke_followup_if_needed(),
+            !app.schedule_auto_poke_followup_if_needed(false),
             "with nothing left outstanding the cycle should finish"
         );
         assert!(
@@ -560,7 +560,7 @@ fn auto_poke_stays_armed_when_a_turn_has_no_todos() {
         app.auto_poke_default_on = true;
 
         assert!(
-            !app.schedule_auto_poke_followup_if_needed(),
+            !app.schedule_auto_poke_followup_if_needed(false),
             "no todos means nothing to poke about this turn"
         );
         assert!(
@@ -583,7 +583,7 @@ fn auto_poke_stays_armed_when_a_turn_has_no_todos() {
         .expect("save incomplete todo");
 
         assert!(
-            app.schedule_auto_poke_followup_if_needed(),
+            app.schedule_auto_poke_followup_if_needed(false),
             "incomplete todos on a later turn must still schedule a poke"
         );
     });
@@ -604,31 +604,31 @@ fn auto_poke_does_not_repeat_until_incomplete_todos_change() {
         };
 
         crate::todo::save_todos(&app.session.id, &[pending("Wait for worker")]).expect("save");
-        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert!(app.schedule_auto_poke_followup_if_needed(false));
 
         // Simulate dispatch and completion of the automatically poked turn.
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         assert!(
-            !app.schedule_auto_poke_followup_if_needed(),
+            !app.schedule_auto_poke_followup_if_needed(false),
             "an unchanged list must not consume another model turn"
         );
 
         crate::todo::save_todos(&app.session.id, &[pending("Review worker result")])
             .expect("update");
         assert!(
-            app.schedule_auto_poke_followup_if_needed(),
+            app.schedule_auto_poke_followup_if_needed(false),
             "changing the todo list must re-arm the automatic nudge"
         );
 
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         crate::todo::save_todos(&app.session.id, &[]).expect("finish cycle");
-        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(!app.schedule_auto_poke_followup_if_needed(false));
         crate::todo::save_todos(&app.session.id, &[pending("Review worker result")])
             .expect("start equivalent new cycle");
         assert!(
-            app.schedule_auto_poke_followup_if_needed(),
+            app.schedule_auto_poke_followup_if_needed(false),
             "an equivalent todo in a new cycle must receive one fresh nudge"
         );
     });
@@ -668,7 +668,7 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
             }],
         )
         .expect("save passing goal");
-        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(!app.schedule_auto_poke_followup_if_needed(false));
         assert!(
             app.auto_poke_incomplete_todos,
             "default-on auto-poke should cover the next batch of work too"
@@ -694,7 +694,7 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         )
         .expect("save passing goal");
         app.auto_poke_incomplete_todos = true; // pretend a stale arm survived
-        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(!app.schedule_auto_poke_followup_if_needed(false));
         assert!(
             !app.auto_poke_incomplete_todos,
             "/poke off must not be undone by the default-on re-arm"

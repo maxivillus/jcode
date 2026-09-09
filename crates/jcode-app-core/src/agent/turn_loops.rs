@@ -57,6 +57,7 @@ impl Agent {
                 logging::info("Cancel observed at turn-loop head - not starting another request");
                 break;
             }
+            self.refresh_agents_md_snapshot();
             let repaired = self.repair_missing_tool_outputs();
             if repaired > 0 {
                 logging::warn(&format!(
@@ -142,6 +143,21 @@ impl Agent {
                 .message_timestamps
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
+            let context_plan = self.prepare_context_preflight(send_messages, &tools, &split_prompt);
+            let context_revision = context_plan.revision;
+            if context_plan.needs_compaction()
+                && self.try_auto_compact_after_context_limit("context length preflight exceeded")
+            {
+                context_limit_retries += 1;
+                if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                    logging::warn("Context-limit preflight retry limit reached; giving up");
+                    return Err(anyhow::anyhow!(
+                        "Context limit exceeded after {} preflight compaction retries",
+                        Self::MAX_CONTEXT_LIMIT_RETRIES
+                    ));
+                }
+                continue;
+            }
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.last_status_detail = None;
             let mut stream = match self
@@ -751,6 +767,9 @@ impl Agent {
                 cache_read_input_tokens: usage_cache_read,
                 cache_creation_input_tokens: usage_cache_creation,
             };
+            if let Some(input) = usage_input {
+                self.record_context_usage(context_revision, input);
+            }
 
             self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
 

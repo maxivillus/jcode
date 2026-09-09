@@ -47,6 +47,14 @@ impl App {
         }
     }
 
+    /// Refresh the local context metadata without changing the transcript or
+    /// provider-facing context.
+    pub(super) fn refresh_context_snapshot(&mut self) {
+        self.refresh_skills_snapshot();
+        self.build_system_prompt_split(None);
+        self.bump_context_revision();
+    }
+
     pub fn cursor_pos(&self) -> usize {
         self.cursor_pos
     }

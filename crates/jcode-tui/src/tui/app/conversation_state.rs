@@ -393,12 +393,11 @@ impl App {
         self.push_display_message(DisplayMessage::system(message));
     }
 
-    fn invalidate_kv_cache_after_compaction(&mut self) {
-        // Compaction intentionally replaces the provider-facing transcript
-        // (typically hundreds of messages become summary + recent tail). The
-        // previous request is therefore not a valid append-only cache baseline.
-        // Advance the generation as well as clearing the current baseline so a
-        // pre-compaction request that completes later cannot restore stale state.
+    pub(super) fn reset_provider_context_state(&mut self) {
+        // Compaction or an explicit reset makes the previous provider-facing
+        // transcript invalid as an append-only cache baseline. Advance the
+        // generation as well as clearing the current baseline so a request
+        // that completes later cannot restore stale state.
         self.kv_cache.cache_generation = self.kv_cache.cache_generation.wrapping_add(1);
         self.kv_cache.kv_cache_baseline = None;
         self.kv_cache.cold_cache_warned_baseline_completed_at = None;
@@ -406,14 +405,17 @@ impl App {
         self.session.provider_session_id = None;
         self.context_warning_shown = false;
         // The sidebar/status context figure is derived from the last
-        // provider-reported stream usage, which described the *pre-compaction*
-        // message list. Mark it stale so the display falls back to the local
-        // estimate over the new (summary + recent) active messages until the
-        // next provider usage report arrives (issue #441). The raw counters
-        // are kept intact for turn footers and cost accounting.
+        // provider-reported stream usage, which described the old provider
+        // context. Mark it stale so the display falls back to the local
+        // estimate until the next provider usage report arrives (issue #441).
+        // The raw counters are kept intact for turn footers and cost accounting.
         self.streaming.streaming_context_stale = true;
         self.streaming.streaming_usage_call_reset_pending = true;
         self.bump_context_revision();
+    }
+
+    fn invalidate_kv_cache_after_compaction(&mut self) {
+        self.reset_provider_context_state();
     }
 
     pub fn set_status_notice(&mut self, text: impl Into<String>) {

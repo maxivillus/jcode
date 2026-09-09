@@ -317,6 +317,7 @@ pub(super) async fn handle_debug_client(
                     session_id: current_session_id,
                     message_count,
                     is_processing: *is_processing.read().await,
+                    context_status: None,
                 };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;
