@@ -247,7 +247,8 @@ async fn test_resume_restores_model_and_tool_history() -> Result<()> {
     Ok(())
 }
 
-/// Test that subscribe selfdev hint marks the session as canary
+/// Test that resume replays local history without an unverified provider
+/// session id when the persisted session has no static-prompt binding.
 #[tokio::test]
 async fn test_resume_session_with_local_history_uses_metadata_only_history() -> Result<()> {
     let _env = setup_test_env()?;
@@ -390,10 +391,10 @@ async fn test_resume_session_with_local_history_uses_metadata_only_history() -> 
     );
 
     let resume_ids = provider.captured_resume_session_ids.lock().unwrap().clone();
-    assert_eq!(
-        resume_ids.last().cloned(),
-        Some(Some("provider-resume-123".to_string()))
-    );
+    // The persisted session has no static-prompt binding. The context
+    // freshness guard must therefore avoid resuming an upstream conversation
+    // whose prompt compatibility cannot be verified.
+    assert_eq!(resume_ids.last().cloned(), Some(None));
 
     abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 

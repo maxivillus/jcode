@@ -387,6 +387,10 @@ impl Session {
                 .any(super::is_visible_conversation_message)
             && !self.saved
             && self.custom_title.is_none()
+            && self.title.is_none()
+            && !self.is_debug
+            && !self.is_canary
+            && self.testing_build.is_none()
         {
             return Ok(());
         }
