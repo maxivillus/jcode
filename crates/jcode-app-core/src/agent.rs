@@ -227,7 +227,7 @@ pub struct Agent {
     /// Cleared on compaction/reset.
     locked_tools: Option<Vec<ToolDefinition>>,
     /// Revision and budget tracking for provider-facing context snapshots.
-    context_controller: ContextController,
+    context_controller: Arc<StdMutex<ContextController>>,
     /// One-shot guard for the async MCP-registration race (#206).
     ///
     /// MCP servers connect on a background task and register `mcp__*` tools
@@ -299,6 +299,7 @@ impl Agent {
         let working_dir = session.working_dir.as_deref().map(std::path::Path::new);
         let agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
         let initial_provider_model = provider.model();
+        let context_controller = Arc::new(StdMutex::new(ContextController::default()));
         let agent = Self {
             provider,
             registry,
@@ -324,7 +325,7 @@ impl Agent {
             cache_tracker: CacheTracker::new(),
             last_usage: TokenUsage::default(),
             locked_tools: None,
-            context_controller: ContextController::default(),
+            context_controller: context_controller.clone(),
             mcp_late_register_resolved: false,
             system_prompt_override: None,
             agents_md_snapshot,
@@ -342,6 +343,9 @@ impl Agent {
             agent.allowed_tools.clone(),
             agent.disabled_tools.clone(),
         );
+        agent
+            .registry
+            .bind_context_controller(&agent.session.id, Arc::downgrade(&context_controller));
         agent
     }
 
@@ -375,8 +379,12 @@ impl Agent {
             .collect()
     }
 
-    pub(crate) fn context_manifest(&self) -> &crate::context::ContextManifest {
-        self.context_controller.manifest()
+    pub(crate) fn context_manifest(&self) -> crate::context::ContextManifest {
+        self.context_controller
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .manifest()
+            .clone()
     }
 
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
@@ -619,7 +627,9 @@ impl Agent {
         self.cache_tracker.reset();
         self.last_usage = TokenUsage::default();
         self.locked_tools = None;
-        self.context_controller = ContextController::default();
+        self.context_controller = Arc::new(StdMutex::new(ContextController::default()));
+        self.registry
+            .bind_context_controller(&self.session.id, Arc::downgrade(&self.context_controller));
         self.mcp_late_register_resolved = false;
         self.last_provider_static_prompt_hash = None;
         self.rewind_undo_snapshot = None;

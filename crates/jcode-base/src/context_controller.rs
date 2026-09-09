@@ -8,8 +8,10 @@ use crate::context::{ContextBudget, ContextComponentHashes, ContextManifest, Con
 use crate::execution_state::{
     ExecutionState, ExecutionStateError, ExecutionStatePatch, ExecutionStateRevision,
 };
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ContextPreflightAction {
     Send,
     Refresh,
@@ -17,7 +19,7 @@ pub enum ContextPreflightAction {
     RefreshThenCompact,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextPreflightPlan {
     pub action: ContextPreflightAction,
     pub revision: ContextRevision,
@@ -45,6 +47,8 @@ impl ContextPreflightPlan {
 pub struct ContextController {
     manifest: ContextManifest,
     execution_state: ExecutionState,
+    last_budget: Option<ContextBudget>,
+    last_plan: Option<ContextPreflightPlan>,
 }
 
 impl ContextController {
@@ -52,6 +56,8 @@ impl ContextController {
         Self {
             manifest,
             execution_state: ExecutionState::default(),
+            last_budget: None,
+            last_plan: None,
         }
     }
 
@@ -64,6 +70,8 @@ impl ContextController {
         Ok(Self {
             manifest,
             execution_state,
+            last_budget: None,
+            last_plan: None,
         })
     }
 
@@ -74,6 +82,16 @@ impl ContextController {
     /// Возвращает единственный state, которым управляет controller.
     pub fn execution_state(&self) -> &ExecutionState {
         &self.execution_state
+    }
+
+    /// Возвращает budget последнего provider preflight, если он уже выполнялся.
+    pub fn last_budget(&self) -> Option<&ContextBudget> {
+        self.last_budget.as_ref()
+    }
+
+    /// Возвращает план последнего provider preflight, если он уже выполнялся.
+    pub fn last_plan(&self) -> Option<&ContextPreflightPlan> {
+        self.last_plan.as_ref()
     }
 
     /// Проверяет patch без изменения state controller.
@@ -99,8 +117,14 @@ impl ContextController {
         components: ContextComponentHashes,
         provider_generation: u64,
     ) -> bool {
-        self.manifest
-            .update_components(components, provider_generation)
+        let changed = self
+            .manifest
+            .update_components(components, provider_generation);
+        if changed {
+            self.last_budget = None;
+            self.last_plan = None;
+        }
+        changed
     }
 
     /// Строит план без изменения Session, transcript или provider state.
@@ -143,6 +167,8 @@ impl ContextController {
             plan.revision = self.manifest.revision;
         }
         self.manifest.estimated_input_tokens = budget.estimated_input_tokens;
+        self.last_budget = Some(*budget);
+        self.last_plan = Some(plan);
         plan
     }
 

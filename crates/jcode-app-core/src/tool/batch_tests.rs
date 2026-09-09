@@ -132,6 +132,9 @@ fn test_schema_only_requires_tool() {
         skills: std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::skill::SkillRegistry::default(),
         )),
+        context_controllers: std::sync::Arc::new(std::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
         compaction: std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::compaction::CompactionManager::new(),
         )),

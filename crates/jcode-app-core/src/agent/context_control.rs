@@ -172,6 +172,8 @@ impl Agent {
         ));
         let plan = self
             .context_controller
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .prepare(&budget, components, provider_generation);
 
         crate::logging::info(&format!(
@@ -197,10 +199,12 @@ impl Agent {
         observed_input_tokens: u64,
     ) {
         let observed = usize::try_from(observed_input_tokens).unwrap_or(usize::MAX);
-        if !self
+        let recorded = self
             .context_controller
-            .record_observed_input_tokens(revision, observed)
-        {
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record_observed_input_tokens(revision, observed);
+        if !recorded {
             crate::logging::warn(&format!(
                 "Ignored provider usage for stale context revision {}",
                 revision.0

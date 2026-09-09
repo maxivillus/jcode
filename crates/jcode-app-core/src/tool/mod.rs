@@ -9,6 +9,7 @@ mod communicate;
 #[cfg(target_os = "macos")]
 mod computer;
 mod config_edit_notice;
+mod context_control;
 mod conversation_search;
 mod debug_socket;
 mod discover;
@@ -33,6 +34,7 @@ mod session_search;
 pub(crate) mod session_search_index;
 mod side_panel;
 mod skill;
+mod skill_state;
 mod todo;
 mod webfetch;
 mod websearch;
@@ -64,13 +66,32 @@ fn is_fixed_mcp_tool(name: &str) -> bool {
 fn is_mcp_tool_name(name: &str) -> bool {
     name == "mcp" || name.starts_with("mcp__") || is_fixed_mcp_tool(name)
 }
-use std::sync::{LazyLock, RwLock as StdRwLock};
+use std::sync::{LazyLock, Mutex as StdMutex, RwLock as StdRwLock, Weak};
 use tokio::sync::RwLock;
 
 pub(crate) use jcode_tool_core::intent_schema_property;
 pub use jcode_tool_core::{StdinInputRequest, Tool, ToolContext, ToolExecutionMode};
 pub use jcode_tool_types::{ToolImage, ToolOutput};
 pub(crate) use session_search::spawn_recent_index_warmup;
+
+pub(crate) type ContextControllerHandle =
+    Arc<StdMutex<crate::context_controller::ContextController>>;
+pub(crate) type ContextControllerBindings =
+    Arc<StdRwLock<HashMap<String, Weak<StdMutex<crate::context_controller::ContextController>>>>>;
+
+pub(crate) fn context_controller_for_session(
+    bindings: &ContextControllerBindings,
+    session_id: &str,
+) -> Result<ContextControllerHandle> {
+    let mut bindings = bindings
+        .write()
+        .map_err(|_| anyhow::anyhow!("context controller bindings lock poisoned"))?;
+    bindings.retain(|_, controller| controller.strong_count() > 0);
+    bindings
+        .get(session_id)
+        .and_then(Weak::upgrade)
+        .ok_or_else(|| anyhow::anyhow!("context controller is not bound for this session"))
+}
 
 #[derive(Clone, Debug, Default)]
 struct SessionToolPolicy {
@@ -164,6 +185,7 @@ pub struct Registry {
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     skills: Arc<RwLock<SkillRegistry>>,
     compaction: Arc<RwLock<CompactionManager>>,
+    context_controllers: ContextControllerBindings,
 }
 
 impl Clone for Registry {
@@ -174,6 +196,7 @@ impl Clone for Registry {
             // Each clone gets a fresh CompactionManager to prevent parallel
             // subagents from corrupting each other's message history
             compaction: Arc::new(RwLock::new(CompactionManager::new())),
+            context_controllers: self.context_controllers.clone(),
         }
     }
 }
@@ -210,6 +233,7 @@ impl Registry {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: Arc::new(RwLock::new(SkillRegistry::default())),
             compaction: Arc::new(RwLock::new(CompactionManager::new())),
+            context_controllers: Arc::new(StdRwLock::new(HashMap::new())),
         }
     }
 
@@ -346,12 +370,24 @@ impl Registry {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: skills.clone(),
             compaction: compaction.clone(),
+            context_controllers: Arc::new(StdRwLock::new(HashMap::new())),
         };
         let registry_struct_ms = registry_struct_start.elapsed().as_millis();
 
         let base_start = std::time::Instant::now();
         let mut tools_map = Self::base_tools(&skills);
         let base_ms = base_start.elapsed().as_millis();
+
+        Self::insert_tool(
+            &mut tools_map,
+            "context_control",
+            context_control::ContextControlTool::new(registry.context_controllers.clone()),
+        );
+        Self::insert_tool(
+            &mut tools_map,
+            "skill_state",
+            skill_state::SkillStateTool::new(registry.context_controllers.clone()),
+        );
 
         // Per-session tools that need provider/registry references
         let session_tools_start = std::time::Instant::now();
@@ -922,6 +958,19 @@ impl Registry {
     pub async fn register(&self, name: String, tool: Arc<dyn Tool>) {
         let mut tools = self.tools.write().await;
         tools.insert(name, tool);
+    }
+
+    pub(crate) fn bind_context_controller(
+        &self,
+        session_id: &str,
+        controller: Weak<StdMutex<crate::context_controller::ContextController>>,
+    ) {
+        let Ok(mut bindings) = self.context_controllers.write() else {
+            crate::logging::warn("Context controller bindings lock poisoned");
+            return;
+        };
+        bindings.retain(|_, current| current.strong_count() > 0);
+        bindings.insert(session_id.to_string(), controller);
     }
 
     /// Register MCP tools (MCP management and server tools)
