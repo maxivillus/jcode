@@ -234,10 +234,9 @@ pub fn provider_model_to_select_after_auth_with_configured_default(
                 && route.model == configured
                 && route_matches_activation(route, activation)
         })
+        && selected_model.map(str::trim) != Some(configured)
     {
-        if selected_model.map(str::trim) != Some(configured) {
-            return Some(configured.to_string());
-        }
+        return Some(configured.to_string());
     }
 
     provider_model_to_select_after_auth(activation, selected_model, routes)
@@ -900,6 +899,7 @@ fn normalized_login_provider_id(provider_id: &str) -> Option<&'static str> {
         "copilot" => Some("copilot"),
         "gemini" => Some("gemini"),
         "antigravity" => Some("antigravity"),
+        "grok-build" => Some("grok-build"),
         _ => None,
     }
 }
@@ -1187,6 +1187,7 @@ pub fn model_switch_request_for_provider_id(
         Some("copilot") => format!("copilot:{}", model),
         Some("gemini") => format!("gemini:{}", model),
         Some("antigravity") => format!("antigravity:{}", model),
+        Some("grok-build") => format!("grok-build:{}", model),
         _ => model.to_string(),
     }
 }
@@ -1474,6 +1475,7 @@ mod tests {
             ("copilot", "copilot", "copilot"),
             ("gemini", "gemini", "gemini"),
             ("antigravity", "antigravity", "antigravity"),
+            ("grok-build", "grok-build", "openrouter"),
         ] {
             crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
             crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
@@ -1541,6 +1543,9 @@ mod tests {
                 }
                 crate::provider_catalog::LoginProviderTarget::Antigravity => {
                     Some(("antigravity", "antigravity", "antigravity", "antigravity"))
+                }
+                crate::provider_catalog::LoginProviderTarget::GrokBuild => {
+                    Some(("grok-build", "grok-build", "openrouter", "grok-build"))
                 }
                 _ => None,
             }) else {
@@ -1620,6 +1625,7 @@ mod tests {
             "copilot",
             "gemini",
             "antigravity",
+            "grok-build",
         ] {
             assert!(
                 covered.contains(&expected),
@@ -1656,6 +1662,7 @@ mod tests {
             ("copilot", "copilot:shared-model"),
             ("gemini", "gemini:shared-model"),
             ("antigravity", "antigravity:shared-model"),
+            ("grok-build", "grok-build:shared-model"),
             ("cerebras", "cerebras:shared-model"),
         ] {
             assert_eq!(

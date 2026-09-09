@@ -2357,9 +2357,7 @@ fn parse_context_command(trimmed: &str) -> Option<ContextCommand> {
         return Some(ContextCommand::Report);
     }
 
-    let Some(arguments) = trimmed.strip_prefix("/context ") else {
-        return None;
-    };
+    let arguments = trimmed.strip_prefix("/context ")?;
     let mut parts = arguments.trim().splitn(2, char::is_whitespace);
     let action = parts.next().unwrap_or_default();
     let path = parts.next().map(str::trim).filter(|path| !path.is_empty());

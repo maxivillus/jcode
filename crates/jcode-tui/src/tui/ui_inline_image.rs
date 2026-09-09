@@ -64,6 +64,7 @@ pub enum ImageExpandLevel {
 
 impl ImageExpandLevel {
     /// Next level in the click cycle (Fit -> Large -> Full -> Fit).
+    #[cfg(test)]
     pub(crate) fn next(self) -> Self {
         match self {
             ImageExpandLevel::Fit => ImageExpandLevel::Large,
