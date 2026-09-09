@@ -389,6 +389,8 @@ jobs:
     name: Build & Test (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 150
+    env:
+      DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -396,6 +398,7 @@ jobs:
           submodules: recursive
 
       - name: Configure SSH for cargo git dependencies
+        if: ${{ env.DEPLOY_KEY != '' }}
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.DEPLOY_KEY }}
