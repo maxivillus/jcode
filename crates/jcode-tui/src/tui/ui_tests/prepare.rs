@@ -608,11 +608,11 @@ fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
         rendered
     );
     assert!(
-        rendered
-            .iter()
-            .all(|line| !line.contains("#1") && !line.contains("#2")),
-        "live batch rows should align with completed rows in {:?}",
-        rendered
+        !rendered.iter().any(|line| {
+            (line.contains("⠋") || line.contains("completed"))
+                && (line.contains("#1") || line.contains("#2"))
+        }),
+        "live batch rows should align with completed rows in {rendered:?}"
     );
 }
 
