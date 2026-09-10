@@ -221,23 +221,61 @@ impl Agent {
         plan
     }
 
+    /// Фиксирует завершение provider-ответа: сверяет revision и пишет usage.
+    ///
+    /// Возвращает `false` для устаревшего ответа: usage не записывается, а
+    /// resumable provider session сбрасывается. Ответ без usage тоже
+    /// проверяется, поэтому окно устаревания не зависит от провайдера.
     pub(super) fn record_context_usage(
         &mut self,
         revision: ContextRevision,
-        observed_input_tokens: u64,
-    ) {
+        observed_input_tokens: Option<u64>,
+    ) -> bool {
+        if !self.note_provider_response_revision(revision) {
+            return false;
+        }
+        let Some(observed_input_tokens) = observed_input_tokens else {
+            return true;
+        };
         let observed = usize::try_from(observed_input_tokens).unwrap_or(usize::MAX);
-        let recorded = self
-            .context_controller
+        self.context_controller
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .record_observed_input_tokens(revision, observed);
-        if !recorded {
-            crate::logging::warn(&format!(
-                "Ignored provider usage for stale context revision {}",
-                revision.0
-            ));
+        true
+    }
+
+    /// Проверяет, что provider-ответ всё ещё относится к текущей revision.
+    ///
+    /// Возвращает `false`, если контекст изменился, пока запрос был в полёте:
+    /// такой ответ описывает транскрипт, которого больше нет. Resumable
+    /// provider session сбрасывается, чтобы устаревший upstream-разговор не
+    /// продолжался как актуальный, а revision сохраняется для наблюдаемости.
+    pub(super) fn note_provider_response_revision(&mut self, revision: ContextRevision) -> bool {
+        let current = self
+            .context_controller
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .manifest()
+            .revision;
+        if current == revision {
+            return true;
         }
+        crate::logging::warn(&format!(
+            "Ignoring late provider response for stale context revision {} (current {})",
+            revision.0, current.0
+        ));
+        self.last_stale_provider_revision = Some(revision.0);
+        self.invalidate_provider_context("late provider response for a stale context revision");
+        false
+    }
+
+    /// Revision устаревшего provider-ответа, который уже нельзя применять.
+    ///
+    /// Ответ устарел, если контекст изменился, пока запрос был в полёте:
+    /// такой ответ описывает транскрипт, которого больше нет.
+    pub(crate) fn last_stale_provider_revision(&self) -> Option<u64> {
+        self.last_stale_provider_revision
     }
 
     /// Применяет заявки модели к контексту на безопасной границе turn-а.

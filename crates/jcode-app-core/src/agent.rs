@@ -201,6 +201,9 @@ pub struct Agent {
     last_connection_type: Option<String>,
     /// Last provider-supplied human-readable transport detail for this session
     last_status_detail: Option<String>,
+    /// Revision устаревшего provider-ответа, который уже нельзя применять:
+    /// контекст изменился, пока запрос был в полёте.
+    last_stale_provider_revision: Option<u64>,
     /// Pending swarm alerts to inject into the next turn
     pending_alerts: Vec<String>,
     /// Transient reminder injected into provider requests for the current turn only.
@@ -324,6 +327,7 @@ impl Agent {
             last_upstream_provider: None,
             last_connection_type: None,
             last_status_detail: None,
+            last_stale_provider_revision: None,
             pending_alerts: Vec::new(),
             current_turn_system_reminder: None,
             tool_call_ids: HashSet::new(),
@@ -629,6 +633,7 @@ impl Agent {
         self.last_upstream_provider = None;
         self.last_connection_type = None;
         self.last_status_detail = None;
+        self.last_stale_provider_revision = None;
         self.pending_alerts.clear();
         self.current_turn_system_reminder = None;
         self.reset_tool_output_tracking();
