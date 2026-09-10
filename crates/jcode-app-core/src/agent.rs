@@ -1113,5 +1113,8 @@ impl Agent {
 }
 
 #[cfg(test)]
+mod context_action_tests;
+
+#[cfg(test)]
 #[path = "agent_tests.rs"]
 mod tests;

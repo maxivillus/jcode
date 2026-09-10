@@ -1,4 +1,5 @@
 use super::*;
+use crate::context_controller::ContextActionOutcome;
 
 impl Agent {
     pub(super) fn note_compaction_applied(&mut self) {
@@ -180,6 +181,61 @@ impl Agent {
         );
 
         true
+    }
+
+    /// Компакция по явному запросу модели (`context_control: compact`).
+    ///
+    /// Действие исполняется на границе turn-а: провайдерский запрос ещё не
+    /// отправлен, revision проверена контроллером. Используется тот же путь,
+    /// что и авто-восстановление по переполнению контекста, но текста ошибки
+    /// нет, поэтому решение принимается явно и результат возвращается
+    /// контроллеру для последующих status/preview.
+    pub(super) fn compact_for_model_request(&mut self) -> ContextActionOutcome {
+        let context_limit = self.provider.context_window() as u64;
+        let compaction = self.registry.compaction();
+        let compacted = match compaction.try_write() {
+            Ok(mut manager) => {
+                let outcome = {
+                    let all_messages = self.session.provider_messages();
+                    manager.update_observed_input_tokens(context_limit);
+                    let usage_pct = manager.context_usage_with(all_messages) * 100.0;
+                    match manager.hard_compact_with(all_messages) {
+                        Ok(dropped) => Ok((dropped, usage_pct)),
+                        Err(reason) => Err(reason),
+                    }
+                };
+                if outcome.is_ok() {
+                    self.sync_session_compaction_state_from_manager(&manager);
+                }
+                outcome
+            }
+            Err(_) => Err("compaction manager lock busy".to_string()),
+        };
+
+        match compacted {
+            Ok((dropped, usage_pct)) => {
+                self.cache_tracker.reset();
+                self.locked_tools = None;
+                self.provider_session_id = None;
+                self.session.provider_session_id = None;
+                logging::info(&format!(
+                    "Model-requested compaction dropped {dropped} messages (usage was {usage_pct:.1}%)"
+                ));
+                crate::runtime_memory_log::emit_event(
+                    crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
+                        "model_compaction_applied",
+                        "context_control_compact",
+                    )
+                    .with_session_id(self.session.id.clone())
+                    .with_detail(format!("dropped_messages={dropped}"))
+                    .force_attribution(),
+                );
+                ContextActionOutcome::Completed {
+                    detail: format!("dropped {dropped} messages; usage was {usage_pct:.1}%"),
+                }
+            }
+            Err(reason) => ContextActionOutcome::Skipped { reason },
+        }
     }
 
     /// Best-effort recovery after a provider HTTP 413 "request too large" error.
