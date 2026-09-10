@@ -27,7 +27,7 @@ fn serialized_token_estimate<T: Serialize + ?Sized>(value: &T) -> usize {
     }
 }
 
-fn message_token_estimate(messages: &[Message]) -> usize {
+pub(super) fn message_token_estimate(messages: &[Message]) -> usize {
     messages
         .iter()
         .map(|message| {
@@ -231,7 +231,7 @@ impl Agent {
             )
         };
         for request in pending {
-            let outcome = self.apply_context_action(request, current_revision);
+            let outcome = self.apply_context_action(&request, current_revision);
             self.context_controller
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -241,7 +241,7 @@ impl Agent {
 
     fn apply_context_action(
         &mut self,
-        request: ContextActionRequest,
+        request: &ContextActionRequest,
         current_revision: ContextRevision,
     ) -> ContextActionOutcome {
         if request.base_revision != current_revision {
@@ -267,6 +267,13 @@ impl Agent {
                 detail: "export is read-only; call context_control export for the manifest"
                     .to_string(),
             },
+            ContextActionKind::Prune => match request.prune {
+                Some(spec) => self.prune_for_model_request(spec),
+                None => ContextActionOutcome::Rejected {
+                    reason: "prune request is missing its spec".to_string(),
+                },
+            },
+            ContextActionKind::UndoPrune => self.undo_prune_for_model_request(),
         }
     }
 }
