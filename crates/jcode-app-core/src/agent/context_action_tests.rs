@@ -1,5 +1,5 @@
 use super::Agent;
-use crate::context::ContextComponentHashes;
+use crate::context::{ContextBudget, ContextComponentHashes, ContextRevision};
 use crate::context_controller::{
     ContextActionKind, ContextActionOutcome, ContextPruneKind, ContextPruneSpec,
 };
@@ -103,6 +103,24 @@ fn count_images(agent: &Agent) -> usize {
         .flat_map(|message| message.content.iter())
         .filter(|block| matches!(block, ContentBlock::Image { .. }))
         .count()
+}
+
+/// Поднимает revision контекста так же, как preflight перед запросом:
+/// меняются hashes компонентов, поэтому revision увеличивается.
+fn bump_context_revision(agent: &Agent, skills: &str) -> ContextRevision {
+    let budget = ContextBudget {
+        provider_context_limit: 100_000,
+        reserved_output_tokens: 1_000,
+        safety_margin_tokens: 1_000,
+        estimated_input_tokens: 0,
+    };
+    let components = ContextComponentHashes::from_texts(None, None, Some(skills), None, None, None);
+    agent
+        .context_controller
+        .lock()
+        .expect("controller lock")
+        .prepare(&budget, components, 1)
+        .revision
 }
 
 fn pending_memory(computed_at: std::time::Instant) -> crate::memory::PendingMemory {
@@ -414,6 +432,71 @@ async fn tools_change_invalidates_resumable_provider_session() {
 
     assert!(agent.provider_session_id.is_none());
     assert!(agent.session.provider_session_id.is_none());
+}
+
+/// Поздний provider-ответ, собранный на прежней revision, не должен
+/// продолжать устаревшую upstream-сессию и не должен попадать в usage.
+#[tokio::test]
+async fn stale_provider_response_does_not_resume_a_stale_provider_session() {
+    let mut agent = test_agent().await;
+    let request_revision = bump_context_revision(&agent, "skills-a");
+
+    // Пока запрос был в полёте, контекст изменился.
+    let current_revision = bump_context_revision(&agent, "skills-b");
+    assert!(current_revision > request_revision);
+
+    // Ответ приходит от session, которая всё ещё собрана из прежней revision.
+    agent.provider_session_id = Some("provider-session".to_string());
+    agent.session.provider_session_id = Some("provider-session".to_string());
+
+    agent.record_context_usage(request_revision, Some(1_234));
+
+    assert!(agent.provider_session_id.is_none());
+    assert!(agent.session.provider_session_id.is_none());
+    assert_eq!(
+        agent.last_stale_provider_revision(),
+        Some(request_revision.0)
+    );
+    assert_eq!(
+        agent
+            .context_controller
+            .lock()
+            .expect("controller lock")
+            .manifest()
+            .observed_input_tokens,
+        None,
+        "usage from a stale revision must not be recorded"
+    );
+}
+
+/// Ответ без usage тоже проверяется: устаревшая revision сбрасывает
+/// resumable provider session, актуальная не трогает её.
+#[tokio::test]
+async fn stale_provider_response_is_detected_without_usage() {
+    let mut agent = test_agent().await;
+    let request_revision = bump_context_revision(&agent, "skills-a");
+    let current_revision = bump_context_revision(&agent, "skills-b");
+
+    agent.provider_session_id = Some("provider-session".to_string());
+
+    assert!(
+        !agent.note_provider_response_revision(request_revision),
+        "late response for a stale revision must be reported"
+    );
+    assert!(agent.provider_session_id.is_none());
+    assert_eq!(
+        agent.last_stale_provider_revision(),
+        Some(request_revision.0)
+    );
+
+    agent.provider_session_id = Some("provider-session".to_string());
+
+    assert!(agent.note_provider_response_revision(current_revision));
+    assert!(agent.provider_session_id.is_some());
+    assert_eq!(
+        agent.last_stale_provider_revision(),
+        Some(request_revision.0)
+    );
 }
 
 #[tokio::test]

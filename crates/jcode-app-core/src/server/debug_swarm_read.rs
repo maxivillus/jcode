@@ -713,6 +713,7 @@ pub(super) async fn maybe_handle_swarm_read_command(
                     "message_count": agent.message_count(),
                     "pending_alert_count": agent.pending_alert_count(),
                     "pending_alerts": agent.pending_alerts_preview(),
+                    "last_stale_provider_revision": agent.last_stale_provider_revision(),
                     "soft_interrupt_count": agent.soft_interrupt_count(),
                     "soft_interrupts": agent.soft_interrupts_preview(),
                     "has_urgent_interrupt": agent.has_urgent_interrupt(),

@@ -767,9 +767,7 @@ impl Agent {
                 cache_read_input_tokens: usage_cache_read,
                 cache_creation_input_tokens: usage_cache_creation,
             };
-            if let Some(input) = usage_input {
-                self.record_context_usage(context_revision, input);
-            }
+            self.record_context_usage(context_revision, usage_input);
 
             self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
 
