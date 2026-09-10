@@ -169,7 +169,15 @@ impl ExecutionState {
 
     /// Возвращает deterministic fingerprint текущего state.
     pub fn fingerprint(&self) -> String {
-        let encoded = serde_json::to_vec(self).unwrap_or_default();
+        let encoded = match serde_json::to_vec(self) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "execution state fingerprint serialization failed: {error}"
+                ));
+                Vec::new()
+            }
+        };
         crate::context::sha256_hex(encoded)
     }
 
