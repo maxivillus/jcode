@@ -171,12 +171,12 @@ impl Tool for ContextControlTool {
                 "action": {
                     "type": "string",
                     "enum": ["status", "preview", "refresh", "compact", "reset-provider", "export"],
-                    "description": "Operation to perform. refresh, compact and reset-provider are queued and applied by the runtime on the next safe turn boundary.",
+                    "description": "Operation to perform; queued actions apply on the next turn.",
                 },
                 "expected_revision": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Revision from the latest status/preview. Required for refresh, compact and reset-provider so a stale request cannot act on a different context.",
+                    "description": "Revision from status/preview; required for queued actions.",
                 },
             },
             "additionalProperties": false,
