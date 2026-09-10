@@ -3,6 +3,17 @@ use crate::context_controller::{ContextActionOutcome, ContextPruneKind, ContextP
 use crate::message::{ContentBlock, Message, Role};
 use crate::session::StoredMessage;
 
+/// Начало сообщения memory-инъекции, как его собирает `memory_injection_message`.
+const MEMORY_INJECTION_MARKER: &str = "<system-reminder>\n# Memory\n";
+
+fn is_memory_injection(message: &StoredMessage) -> bool {
+    message.role == Role::User
+        && message.content.iter().any(|block| match block {
+            ContentBlock::Text { text, .. } => text.starts_with(MEMORY_INJECTION_MARKER),
+            _ => false,
+        })
+}
+
 /// История и provider-сессия до обратимой обрезки контекста.
 #[derive(Clone)]
 pub(super) struct ContextPruneUndoSnapshot {
@@ -24,6 +35,7 @@ impl Agent {
     ) -> ContextActionOutcome {
         let keep_recent = spec.keep_recent.unwrap_or(match spec.kind {
             ContextPruneKind::Images => 1,
+            ContextPruneKind::MemoryInjections => 1,
             ContextPruneKind::ToolResults => 2,
             ContextPruneKind::Turns => 6,
         });
@@ -36,6 +48,7 @@ impl Agent {
 
         let pruned = match spec.kind {
             ContextPruneKind::Images => self.prune_images(keep_recent),
+            ContextPruneKind::MemoryInjections => self.prune_memory_injections(keep_recent),
             ContextPruneKind::ToolResults => self.prune_tool_results(keep_recent),
             ContextPruneKind::Turns => self.prune_turns(keep_recent),
         };
@@ -138,6 +151,37 @@ impl Agent {
             }
         }
         pruned
+    }
+
+    /// Удаляет старые memory-инъекции, сохраняя последние `keep_recent`.
+    fn prune_memory_injections(&mut self, keep_recent: usize) -> usize {
+        let mut remaining_keep = keep_recent;
+        let mut keep: Vec<bool> = vec![true; self.session.messages.len()];
+        let mut dropped = 0usize;
+        for (index, message) in self.session.messages.iter().enumerate().rev() {
+            if !is_memory_injection(message) {
+                continue;
+            }
+            if remaining_keep > 0 {
+                remaining_keep -= 1;
+                continue;
+            }
+            keep[index] = false;
+            dropped += 1;
+        }
+        if dropped == 0 {
+            return 0;
+        }
+        let retained: Vec<StoredMessage> = self
+            .session
+            .messages
+            .iter()
+            .zip(keep)
+            .filter(|(_, keep)| *keep)
+            .map(|(message, _)| message.clone())
+            .collect();
+        self.session.replace_messages(retained);
+        dropped
     }
 
     /// Оставляет только последние `keep_recent` видимых сообщений, удаляя

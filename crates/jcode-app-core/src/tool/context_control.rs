@@ -197,7 +197,7 @@ impl Tool for ContextControlTool {
                     "properties": {
                         "kind": {
                             "type": "string",
-                            "enum": ["images", "tool-results", "turns"],
+                            "enum": ["images", "memory-injections", "tool-results", "turns"],
                             "description": "Structural data to prune.",
                         },
                         "keep_recent": {
@@ -262,11 +262,12 @@ impl Tool for ContextControlTool {
                 let request = if action == "prune" {
                     let input = params.prune.ok_or_else(|| {
                         anyhow::anyhow!(
-                            "prune spec is required for `prune`; pass kind images|tool-results|turns"
+                            "prune spec is required for `prune`; pass kind images|memory-injections|tool-results|turns"
                         )
                     })?;
                     let kind = match input.kind.as_str() {
                         "images" => ContextPruneKind::Images,
+                        "memory-injections" => ContextPruneKind::MemoryInjections,
                         "tool-results" => ContextPruneKind::ToolResults,
                         "turns" => ContextPruneKind::Turns,
                         other => anyhow::bail!("unsupported prune kind: {other}"),
@@ -350,7 +351,16 @@ mod tests {
                     "undo-prune"
                 ]),
             ),
-            ("skill_state", json!(["get_state", "propose_patch"])),
+            (
+                "skill_state",
+                json!([
+                    "get_state",
+                    "propose_patch",
+                    "record_observation",
+                    "retrieve_evidence",
+                    "reconcile"
+                ]),
+            ),
         ] {
             let schema = &definitions
                 .iter()
@@ -393,7 +403,7 @@ mod tests {
         );
         assert_eq!(
             schema["properties"]["prune"]["properties"]["kind"]["enum"],
-            json!(["images", "tool-results", "turns"])
+            json!(["images", "memory-injections", "tool-results", "turns"])
         );
     }
 

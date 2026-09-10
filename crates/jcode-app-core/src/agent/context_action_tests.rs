@@ -417,6 +417,52 @@ async fn tools_change_invalidates_resumable_provider_session() {
 }
 
 #[tokio::test]
+async fn prune_memory_injections_removes_stale_payloads_and_undo_restores() {
+    let mut agent = test_agent().await;
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "real turn".to_string(),
+            cache_control: None,
+        }],
+    );
+    for index in 0..3 {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!(
+                    "<system-reminder>\n# Memory\n{index}. remembered fact {index}\n</system-reminder>"
+                ),
+                cache_control: None,
+            }],
+        );
+    }
+    let before = agent.session.messages.len();
+    request_prune(&agent, ContextPruneKind::MemoryInjections, Some(0));
+
+    agent.apply_pending_context_actions();
+
+    assert!(matches!(
+        last_outcome(&agent),
+        ContextActionOutcome::Completed { .. }
+    ));
+    assert_eq!(agent.session.messages.len(), before - 3);
+    assert!(
+        agent.session.messages.iter().all(|message| {
+            !message.content.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text, .. } if text.contains("# Memory"))
+            })
+        }),
+        "memory injections must be gone"
+    );
+
+    request_action(&agent, ContextActionKind::UndoPrune);
+    agent.apply_pending_context_actions();
+
+    assert_eq!(agent.session.messages.len(), before);
+}
+
+#[tokio::test]
 async fn skills_change_invalidates_resumable_provider_session() {
     let mut agent = test_agent().await;
     let baseline =
