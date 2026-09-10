@@ -1,5 +1,6 @@
 use super::{Tool, ToolContext, ToolOutput, skill_state};
-use crate::context_controller::ContextController;
+use crate::context::ContextRevision;
+use crate::context_controller::{ContextActionKind, ContextController};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -73,6 +74,10 @@ impl ContextControlTool {
 struct ContextControlInput {
     #[serde(default = "default_action")]
     action: String,
+    /// Revision, которую модель увидела в status/preview. Требуется для
+    /// действий, которые меняют состояние на границе turn-а.
+    #[serde(default)]
+    expected_revision: Option<u64>,
 }
 
 fn default_action() -> String {
@@ -108,6 +113,38 @@ fn preflight_metadata(controller: &ContextController) -> Value {
     }
 }
 
+fn execution_state_metadata(controller: &ContextController) -> Value {
+    let state = controller.execution_state();
+    json!({
+        "state_schema": state.state_schema,
+        "schema_version": state.schema_version,
+        "revision": state.revision,
+    })
+}
+
+fn actions_metadata(controller: &ContextController) -> Value {
+    json!({
+        "pending": controller.pending_actions(),
+        "last": controller.last_action(),
+    })
+}
+
+fn queued_action_metadata(
+    action: &str,
+    controller: &ContextController,
+    request: crate::context_controller::ContextActionRequest,
+) -> Value {
+    json!({
+        "action": action,
+        "mutated": false,
+        "queued": true,
+        "request": request,
+        "current_revision": controller.manifest().revision,
+        "next_step": "runtime applies queued actions on the next safe turn boundary",
+        "actions": actions_metadata(controller),
+    })
+}
+
 fn output(title: &str, metadata: Value) -> ToolOutput {
     let body = serde_json::to_string_pretty(&metadata).unwrap_or_else(|_| metadata.to_string());
     ToolOutput::new(body)
@@ -122,7 +159,7 @@ impl Tool for ContextControlTool {
     }
 
     fn description(&self) -> &str {
-        "Read-only context status and preflight metadata."
+        "Read-only context status, preflight metadata and queued context actions."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -133,8 +170,13 @@ impl Tool for ContextControlTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["status", "preview"],
-                    "description": "Read-only operation to perform.",
+                    "enum": ["status", "preview", "refresh", "compact", "reset-provider", "export"],
+                    "description": "Operation to perform. refresh, compact and reset-provider are queued and applied by the runtime on the next safe turn boundary.",
+                },
+                "expected_revision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Revision from the latest status/preview. Required for refresh, compact and reset-provider so a stale request cannot act on a different context.",
                 },
             },
             "additionalProperties": false,
@@ -144,23 +186,42 @@ impl Tool for ContextControlTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: ContextControlInput = serde_json::from_value(input)?;
         let controller = context_controller_for_session(&self.bindings, &ctx.session_id)?;
-        let controller = controller
+        let mut controller = controller
             .lock()
             .map_err(|_| anyhow::anyhow!("context controller lock poisoned"))?;
 
         let action = params.action.as_str();
         let metadata = match action {
-            "status" => json!({
+            "status" | "preview" => json!({
                 "action": action,
                 "mutated": false,
                 "context": context_metadata(&controller),
                 "preflight": preflight_metadata(&controller),
+                "actions": actions_metadata(&controller),
             }),
-            "preview" => json!({
+            "refresh" | "compact" | "reset-provider" => {
+                let expected = params.expected_revision.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "expected_revision is required for `{action}`; read status first"
+                    )
+                })?;
+                let kind = match action {
+                    "refresh" => ContextActionKind::Refresh,
+                    "compact" => ContextActionKind::Compact,
+                    _ => ContextActionKind::ResetProvider,
+                };
+                let request = controller
+                    .request_action(kind, ContextRevision(expected))
+                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                queued_action_metadata(action, &controller, request)
+            }
+            "export" => json!({
                 "action": action,
                 "mutated": false,
-                "context": context_metadata(&controller),
-                "preflight": preflight_metadata(&controller),
+                "writes_file": false,
+                "manifest": context_metadata(&controller),
+                "execution_state": execution_state_metadata(&controller),
+                "actions": actions_metadata(&controller),
             }),
             _ => anyhow::bail!("unsupported context_control action: {action}"),
         };
@@ -214,7 +275,17 @@ mod tests {
         let registry = Registry::new(Arc::new(MockProvider)).await;
         let definitions = registry.definitions(None).await;
         for (name, actions) in [
-            ("context_control", json!(["status", "preview"])),
+            (
+                "context_control",
+                json!([
+                    "status",
+                    "preview",
+                    "refresh",
+                    "compact",
+                    "reset-provider",
+                    "export"
+                ]),
+            ),
             ("skill_state", json!(["get_state", "propose_patch"])),
         ] {
             let schema = &definitions
@@ -234,14 +305,25 @@ mod tests {
     }
 
     #[test]
-    fn schema_exposes_only_read_only_actions() {
+    fn schema_exposes_read_only_and_queued_actions() {
         let bindings: ContextControllerBindings = Arc::new(RwLock::new(HashMap::new()));
         let schema = ContextControlTool::new(bindings).parameters_schema();
 
         assert_eq!(schema["additionalProperties"], json!(false));
         assert_eq!(
             schema["properties"]["action"]["enum"],
-            json!(["status", "preview"])
+            json!([
+                "status",
+                "preview",
+                "refresh",
+                "compact",
+                "reset-provider",
+                "export"
+            ])
+        );
+        assert_eq!(
+            schema["properties"]["expected_revision"]["type"],
+            json!("integer")
         );
     }
 
@@ -316,14 +398,160 @@ mod tests {
         let (tool, _controller, ctx) = bound_tool("context-invalid");
 
         let error = tool
-            .execute(json!({"action": "compact"}), ctx)
+            .execute(json!({"action": "prune"}), ctx)
             .await
-            .expect_err("mutating action must not be exposed by this MVP");
+            .expect_err("unknown action must be rejected");
 
         assert!(
             error
                 .to_string()
                 .contains("unsupported context_control action")
         );
+    }
+
+    #[tokio::test]
+    async fn queued_action_requires_expected_revision() {
+        let (tool, _controller, ctx) = bound_tool("context-queued-missing");
+
+        let error = tool
+            .execute(json!({"action": "compact"}), ctx)
+            .await
+            .expect_err("missing revision must be rejected");
+
+        assert!(
+            error.to_string().contains("expected_revision is required"),
+            "got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_revision_is_rejected_for_queued_action() {
+        let (tool, controller, ctx) = bound_tool("context-queued-stale");
+        {
+            let mut controller = controller.lock().expect("controller lock");
+            controller.update_sources(ContextComponentHashes::default(), 7);
+        }
+
+        let error = tool
+            .execute(json!({"action": "compact", "expected_revision": 0}), ctx)
+            .await
+            .expect_err("stale revision must be rejected");
+
+        assert!(
+            error.to_string().contains("context revision changed"),
+            "got: {error}"
+        );
+        assert!(
+            controller
+                .lock()
+                .expect("controller lock")
+                .pending_actions()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_action_is_idempotent_and_not_mutating() {
+        let (tool, controller, ctx) = bound_tool("context-queued-ok");
+        let revision = controller
+            .lock()
+            .expect("controller lock")
+            .manifest()
+            .revision;
+        let before_state = controller
+            .lock()
+            .expect("controller lock")
+            .execution_state()
+            .clone();
+
+        let input = json!({"action": "reset-provider", "expected_revision": revision.0});
+        let first = tool
+            .execute(input.clone(), ctx.clone())
+            .await
+            .expect("fresh revision is accepted");
+        let second = tool
+            .execute(input, ctx)
+            .await
+            .expect("repeat stays accepted");
+
+        let first = first.metadata.expect("metadata");
+        let second = second.metadata.expect("metadata");
+        assert_eq!(first["queued"], json!(true));
+        assert_eq!(first["mutated"], json!(false));
+        assert_eq!(first["request"]["sequence"], json!(1));
+        assert_eq!(second["request"], first["request"]);
+
+        let controller = controller.lock().expect("controller lock");
+        assert_eq!(controller.pending_actions().len(), 1);
+        assert_eq!(controller.execution_state(), &before_state);
+    }
+
+    #[tokio::test]
+    async fn export_returns_redacted_manifest_without_file() {
+        let (tool, controller, ctx) = bound_tool("context-export");
+        {
+            let mut controller = controller.lock().expect("controller lock");
+            controller.update_sources(ContextComponentHashes::default(), 11);
+            let revision = controller.manifest().revision;
+            let request = controller
+                .request_action(ContextActionKind::Compact, revision)
+                .expect("request accepted");
+            controller.take_pending_actions();
+            controller.record_action_outcome(
+                request,
+                crate::context_controller::ContextActionOutcome::Skipped {
+                    reason: "nothing to compact".to_string(),
+                },
+            );
+        }
+
+        let result = tool
+            .execute(json!({"action": "export"}), ctx)
+            .await
+            .expect("export should succeed");
+        let metadata = result.metadata.expect("export metadata");
+
+        assert_eq!(metadata["writes_file"], json!(false));
+        assert_eq!(metadata["manifest"]["revision"], json!(1));
+        assert_eq!(metadata["manifest"]["provider_generation"], json!(11));
+        assert!(metadata["manifest"]["fingerprint"].is_string());
+        assert_eq!(
+            metadata["actions"]["last"]["outcome"]["status"],
+            json!("skipped")
+        );
+        assert_eq!(
+            metadata["actions"]["last"]["request"]["action"],
+            json!("compact")
+        );
+        assert!(metadata["manifest"]["messages"].is_null());
+        assert!(metadata["manifest"]["transcript"].is_null());
+    }
+
+    #[tokio::test]
+    async fn status_reports_pending_actions() {
+        let (tool, controller, ctx) = bound_tool("context-status-actions");
+        let revision = controller
+            .lock()
+            .expect("controller lock")
+            .manifest()
+            .revision;
+        controller
+            .lock()
+            .expect("controller lock")
+            .request_action(ContextActionKind::Refresh, revision)
+            .expect("request accepted");
+
+        let result = tool
+            .execute(json!({"action": "status"}), ctx)
+            .await
+            .expect("status should succeed");
+        let metadata = result.metadata.expect("status metadata");
+
+        assert_eq!(
+            metadata["actions"]["pending"][0]["action"],
+            json!("refresh")
+        );
+        assert_eq!(metadata["actions"]["pending"][0]["sequence"], json!(1));
+        assert!(metadata["actions"]["last"].is_null());
     }
 }
