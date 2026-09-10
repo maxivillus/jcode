@@ -1,6 +1,8 @@
 use super::Agent;
 use crate::context::{ContextBudget, ContextComponentHashes, ContextRevision, sha256_hex};
-use crate::context_controller::ContextPreflightPlan;
+use crate::context_controller::{
+    ContextActionKind, ContextActionOutcome, ContextActionRequest, ContextPreflightPlan,
+};
 use crate::message::{ContentBlock, Message, ToolDefinition};
 use crate::prompt::SplitSystemPrompt;
 use crate::skill_runtime::SkillRuntimeRegistry;
@@ -209,6 +211,62 @@ impl Agent {
                 "Ignored provider usage for stale context revision {}",
                 revision.0
             ));
+        }
+    }
+
+    /// Применяет заявки модели к контексту на безопасной границе turn-а.
+    ///
+    /// Вызывается до сборки provider request: refresh учитывается preflight-ом,
+    /// compact уменьшает активную историю, reset-provider сбрасывает
+    /// resumable provider session. Заявка с устаревшей revision отклоняется.
+    pub(super) fn apply_pending_context_actions(&mut self) {
+        let (pending, current_revision) = {
+            let mut controller = self
+                .context_controller
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                controller.take_pending_actions(),
+                controller.manifest().revision,
+            )
+        };
+        for request in pending {
+            let outcome = self.apply_context_action(request, current_revision);
+            self.context_controller
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .record_action_outcome(request, outcome);
+        }
+    }
+
+    fn apply_context_action(
+        &mut self,
+        request: ContextActionRequest,
+        current_revision: ContextRevision,
+    ) -> ContextActionOutcome {
+        if request.base_revision != current_revision {
+            return ContextActionOutcome::Rejected {
+                reason: format!(
+                    "request was based on revision {} but context is at {}",
+                    request.base_revision.0, current_revision.0
+                ),
+            };
+        }
+        match request.action {
+            ContextActionKind::Refresh => ContextActionOutcome::Completed {
+                detail: "preflight refreshes component hashes for the next request".to_string(),
+            },
+            ContextActionKind::Compact => self.compact_for_model_request(),
+            ContextActionKind::ResetProvider => {
+                self.reset_provider_session();
+                ContextActionOutcome::Completed {
+                    detail: "provider session reset; next request sends full context".to_string(),
+                }
+            }
+            ContextActionKind::Export => ContextActionOutcome::Completed {
+                detail: "export is read-only; call context_control export for the manifest"
+                    .to_string(),
+            },
         }
     }
 }
