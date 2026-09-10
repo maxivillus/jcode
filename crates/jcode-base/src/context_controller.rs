@@ -1,12 +1,17 @@
-//! Read-only preflight logic for the next provider request.
+//! Context preflight and validated execution state flow for the next request.
 //!
 //! The controller keeps the decision rule separate from `Session` and the
 //! transcript. The turn loop may use its result to select an existing
 //! compaction path without making the controller a second transcript owner.
 
 use crate::context::{ContextBudget, ContextComponentHashes, ContextManifest, ContextRevision};
+use crate::execution_state::{
+    ExecutionState, ExecutionStateError, ExecutionStatePatch, ExecutionStateRevision,
+};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ContextPreflightAction {
     Send,
     Refresh,
@@ -14,7 +19,7 @@ pub enum ContextPreflightAction {
     RefreshThenCompact,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextPreflightPlan {
     pub action: ContextPreflightAction,
     pub revision: ContextRevision,
@@ -41,15 +46,69 @@ impl ContextPreflightPlan {
 #[derive(Debug, Clone, Default)]
 pub struct ContextController {
     manifest: ContextManifest,
+    execution_state: ExecutionState,
+    last_budget: Option<ContextBudget>,
+    last_plan: Option<ContextPreflightPlan>,
 }
 
 impl ContextController {
     pub fn new(manifest: ContextManifest) -> Self {
-        Self { manifest }
+        Self {
+            manifest,
+            execution_state: ExecutionState::default(),
+            last_budget: None,
+            last_plan: None,
+        }
+    }
+
+    /// Создаёт controller с восстановленным и проверенным execution state.
+    pub fn new_with_execution_state(
+        manifest: ContextManifest,
+        execution_state: ExecutionState,
+    ) -> Result<Self, ExecutionStateError> {
+        execution_state.validate()?;
+        Ok(Self {
+            manifest,
+            execution_state,
+            last_budget: None,
+            last_plan: None,
+        })
     }
 
     pub fn manifest(&self) -> &ContextManifest {
         &self.manifest
+    }
+
+    /// Возвращает единственный state, которым управляет controller.
+    pub fn execution_state(&self) -> &ExecutionState {
+        &self.execution_state
+    }
+
+    /// Возвращает budget последнего provider preflight, если он уже выполнялся.
+    pub fn last_budget(&self) -> Option<&ContextBudget> {
+        self.last_budget.as_ref()
+    }
+
+    /// Возвращает план последнего provider preflight, если он уже выполнялся.
+    pub fn last_plan(&self) -> Option<&ContextPreflightPlan> {
+        self.last_plan.as_ref()
+    }
+
+    /// Проверяет patch без изменения state controller.
+    pub fn preview_execution_state_patch(
+        &self,
+        patch: &ExecutionStatePatch,
+    ) -> Result<ExecutionState, ExecutionStateError> {
+        self.execution_state.preview_patch(patch)
+    }
+
+    /// Атомарно применяет проверенный patch и возвращает новую state revision.
+    pub fn apply_execution_state_patch(
+        &mut self,
+        patch: &ExecutionStatePatch,
+    ) -> Result<ExecutionStateRevision, ExecutionStateError> {
+        self.execution_state.apply_patch(patch)?;
+        Ok(self.execution_state.revision)
     }
 
     /// Обновляет hashes и provider generation до отправки запроса.
@@ -58,8 +117,14 @@ impl ContextController {
         components: ContextComponentHashes,
         provider_generation: u64,
     ) -> bool {
-        self.manifest
-            .update_components(components, provider_generation)
+        let changed = self
+            .manifest
+            .update_components(components, provider_generation);
+        if changed {
+            self.last_budget = None;
+            self.last_plan = None;
+        }
+        changed
     }
 
     /// Строит план без изменения Session, transcript или provider state.
@@ -102,6 +167,8 @@ impl ContextController {
             plan.revision = self.manifest.revision;
         }
         self.manifest.estimated_input_tokens = budget.estimated_input_tokens;
+        self.last_budget = Some(*budget);
+        self.last_plan = Some(plan);
         plan
     }
 
@@ -123,6 +190,7 @@ impl ContextController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution_state::{ExecutionStateError, ExecutionStateRevision, PatchValue};
 
     fn components(value: &str) -> ContextComponentHashes {
         ContextComponentHashes::from_texts(Some(value), None, None, None, None, None)
@@ -135,6 +203,88 @@ mod tests {
             safety_margin_tokens: 10,
             estimated_input_tokens,
         }
+    }
+
+    fn state_patch(controller: &ContextController) -> ExecutionStatePatch {
+        let state = controller.execution_state();
+        let mut patch = ExecutionStatePatch::new(state.state_schema.clone(), state.revision);
+        patch.phase = Some(PatchValue::Set("preflight".to_string()));
+        patch
+    }
+
+    #[test]
+    fn controller_owns_valid_default_execution_state() {
+        let controller = ContextController::default();
+
+        assert_eq!(
+            controller.execution_state().revision,
+            ExecutionStateRevision::INITIAL
+        );
+        assert!(controller.execution_state().validate().is_ok());
+    }
+
+    #[test]
+    fn preview_does_not_mutate_controller_state() {
+        let controller = ContextController::default();
+        let before = controller.execution_state().clone();
+
+        let preview = controller
+            .preview_execution_state_patch(&state_patch(&controller))
+            .expect("preview should accept a fresh patch");
+
+        assert_eq!(controller.execution_state(), &before);
+        assert_eq!(preview.phase.as_deref(), Some("preflight"));
+        assert_eq!(preview.revision, ExecutionStateRevision(1));
+    }
+
+    #[test]
+    fn controller_applies_state_patch_and_returns_new_revision() {
+        let mut controller = ContextController::default();
+
+        let revision = controller
+            .apply_execution_state_patch(&state_patch(&controller))
+            .expect("controller should apply a fresh patch");
+
+        assert_eq!(revision, ExecutionStateRevision(1));
+        assert_eq!(
+            controller.execution_state().phase.as_deref(),
+            Some("preflight")
+        );
+    }
+
+    #[test]
+    fn stale_controller_patch_is_rejected_atomically() {
+        let mut controller = ContextController::default();
+        let stale_patch = state_patch(&controller);
+        controller
+            .apply_execution_state_patch(&stale_patch)
+            .expect("first patch should apply");
+        let before = controller.execution_state().clone();
+
+        let error = controller
+            .apply_execution_state_patch(&stale_patch)
+            .expect_err("stale patch should be rejected");
+
+        assert!(matches!(
+            error,
+            ExecutionStateError::RevisionMismatch { .. }
+        ));
+        assert_eq!(controller.execution_state(), &before);
+    }
+
+    #[test]
+    fn injected_execution_state_is_validated_before_ownership() {
+        let mut invalid = ExecutionState::default();
+        invalid.schema_version += 1;
+
+        let error =
+            ContextController::new_with_execution_state(ContextManifest::default(), invalid)
+                .expect_err("invalid injected state should be rejected");
+
+        assert!(matches!(
+            error,
+            ExecutionStateError::UnsupportedStateSchemaVersion { .. }
+        ));
     }
 
     #[test]

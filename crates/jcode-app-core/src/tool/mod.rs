@@ -9,6 +9,7 @@ mod communicate;
 #[cfg(target_os = "macos")]
 mod computer;
 mod config_edit_notice;
+mod context_control;
 mod conversation_search;
 mod debug_socket;
 mod discover;
@@ -33,6 +34,7 @@ mod session_search;
 pub(crate) mod session_search_index;
 mod side_panel;
 mod skill;
+mod skill_state;
 mod todo;
 mod webfetch;
 mod websearch;
@@ -156,14 +158,12 @@ fn accepts_large_output(input: &Value) -> bool {
     }
 }
 
-/// Registry of available tools (Arc-wrapped for sharing)
-///
-/// Clone creates a fresh CompactionManager so each subagent gets independent
-/// message history tracking. Tools and skills are shared via Arc.
+/// Shared tool and skill registry with isolated compaction state per clone.
 pub struct Registry {
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     skills: Arc<RwLock<SkillRegistry>>,
     compaction: Arc<RwLock<CompactionManager>>,
+    context_tools: context_control::ContextTools,
 }
 
 impl Clone for Registry {
@@ -171,9 +171,9 @@ impl Clone for Registry {
         Self {
             tools: self.tools.clone(),
             skills: self.skills.clone(),
-            // Each clone gets a fresh CompactionManager to prevent parallel
-            // subagents from corrupting each other's message history
+            // Keep compaction state isolated between parallel subagents.
             compaction: Arc::new(RwLock::new(CompactionManager::new())),
+            context_tools: self.context_tools.clone(),
         }
     }
 }
@@ -203,18 +203,17 @@ impl Registry {
         timings.push((name.to_string(), start.elapsed().as_millis()));
     }
 
-    /// Create a lightweight empty registry (no tools, no skill loading).
-    /// Used by remote-mode clients that don't execute tools locally.
+    /// Lightweight registry for remote-mode clients that do not execute tools locally.
     pub fn empty() -> Self {
         Self {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: Arc::new(RwLock::new(SkillRegistry::default())),
             compaction: Arc::new(RwLock::new(CompactionManager::new())),
+            context_tools: context_control::ContextTools::new(),
         }
     }
 
-    /// Base tools that are stateless and can be shared across sessions.
-    /// Created once and cached in a OnceLock, then cloned (cheap Arc bumps) per session.
+    /// Cache stateless base tools and clone their cheap Arc handles per session.
     fn base_tools(skills: &Arc<RwLock<SkillRegistry>>) -> HashMap<String, Arc<dyn Tool>> {
         use std::sync::OnceLock;
         static BASE: OnceLock<HashMap<String, Arc<dyn Tool>>> = OnceLock::new();
@@ -316,19 +315,13 @@ impl Registry {
             ));
             m
         });
-        // Clone the Arc entries (cheap refcount bumps, not deep copies)
         let mut tools = base.clone();
-        // SkillTool needs the skills registry reference (shared across sessions)
         Self::insert_tool(
             &mut tools,
             "skill_manage",
             skill::SkillTool::new(skills.clone()),
         );
-        // The swarm tool captures the user-editable swarm prompt in its
-        // description. Construct it once per session rather than sharing the
-        // process-wide instance. Existing sessions keep their stable tool
-        // definition (and provider KV cache), while newly created agents see
-        // prompt edits immediately.
+        // Build swarm per session so prompt edits reach new agents without changing existing definitions.
         Self::insert_tool(&mut tools, "swarm", communicate::CommunicateTool::new());
         tools
     }
@@ -346,6 +339,7 @@ impl Registry {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: skills.clone(),
             compaction: compaction.clone(),
+            context_tools: context_control::ContextTools::new(),
         };
         let registry_struct_ms = registry_struct_start.elapsed().as_millis();
 
@@ -353,7 +347,8 @@ impl Registry {
         let mut tools_map = Self::base_tools(&skills);
         let base_ms = base_start.elapsed().as_millis();
 
-        // Per-session tools that need provider/registry references
+        registry.context_tools.register(&mut tools_map);
+
         let session_tools_start = std::time::Instant::now();
         Self::insert_tool(
             &mut tools_map,
@@ -365,9 +360,7 @@ impl Registry {
             "conversation_search",
             conversation_search::ConversationSearchTool::new(compaction),
         );
-        // Integration discovery is on by default (opt-out); when disabled the
-        // tool is never registered and no discovery endpoint is ever
-        // contacted.
+        // Register discovery only when sponsors are enabled.
         if crate::config::config().sponsors.enabled {
             Self::insert_tool(
                 &mut tools_map,
@@ -924,10 +917,16 @@ impl Registry {
         tools.insert(name, tool);
     }
 
-    /// Register MCP tools (MCP management and server tools)
-    /// Connections happen in background to avoid blocking startup.
-    /// If `event_tx` is provided, sends an McpStatus event when connections complete.
-    /// If `shared_pool` is provided, shared servers reuse processes from the pool.
+    pub(crate) fn bind_context_controller(
+        &self,
+        session_id: &str,
+        controller: context_control::ContextControllerWeak,
+    ) {
+        self.context_tools.bind(session_id, controller);
+    }
+
+    /// Register MCP tools and connect them in background.
+    /// Optional event and shared-pool arguments control status reporting and process reuse.
     pub async fn register_mcp_tools(
         &self,
         event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::protocol::ServerEvent>>,
