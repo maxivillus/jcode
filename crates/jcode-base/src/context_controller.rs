@@ -54,14 +54,49 @@ pub enum ContextActionKind {
     Compact,
     ResetProvider,
     Export,
+    Prune,
+    UndoPrune,
+}
+
+/// Вид структурной обрезки контекста.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContextPruneKind {
+    Images,
+    ToolResults,
+    Turns,
+}
+
+/// Параметры обрезки: что именно режем и сколько последних элементов щадим.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextPruneSpec {
+    pub kind: ContextPruneKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_recent: Option<usize>,
+}
+
+impl ContextPruneSpec {
+    pub fn new(kind: ContextPruneKind) -> Self {
+        Self {
+            kind,
+            keep_recent: None,
+        }
+    }
+
+    pub fn keep_recent(mut self, keep_recent: usize) -> Self {
+        self.keep_recent = Some(keep_recent);
+        self
+    }
 }
 
 /// Проверенный запрос действия с revision, на которой он основан.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextActionRequest {
     pub action: ContextActionKind,
     pub base_revision: ContextRevision,
     pub sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prune: Option<ContextPruneSpec>,
 }
 
 /// Итог применения запроса на границе turn-а.
@@ -174,6 +209,24 @@ impl ContextController {
         action: ContextActionKind,
         expected_revision: ContextRevision,
     ) -> Result<ContextActionRequest, ContextActionError> {
+        self.request_action_with_prune(action, expected_revision, None)
+    }
+
+    /// Ставит запрос структурной обрезки с явными параметрами.
+    pub fn request_prune(
+        &mut self,
+        spec: ContextPruneSpec,
+        expected_revision: ContextRevision,
+    ) -> Result<ContextActionRequest, ContextActionError> {
+        self.request_action_with_prune(ContextActionKind::Prune, expected_revision, Some(spec))
+    }
+
+    fn request_action_with_prune(
+        &mut self,
+        action: ContextActionKind,
+        expected_revision: ContextRevision,
+        prune: Option<ContextPruneSpec>,
+    ) -> Result<ContextActionRequest, ContextActionError> {
         let current = self.manifest.revision;
         if expected_revision != current {
             return Err(ContextActionError::StaleRevision {
@@ -184,17 +237,18 @@ impl ContextController {
         if let Some(existing) = self
             .pending_actions
             .iter()
-            .find(|pending| pending.action == action)
+            .find(|pending| pending.action == action && pending.prune == prune)
         {
-            return Ok(*existing);
+            return Ok(existing.clone());
         }
         self.next_action_sequence = self.next_action_sequence.saturating_add(1);
         let request = ContextActionRequest {
             action,
             base_revision: current,
             sequence: self.next_action_sequence,
+            prune,
         };
-        self.pending_actions.push(request);
+        self.pending_actions.push(request.clone());
         Ok(request)
     }
 
@@ -540,7 +594,8 @@ mod tests {
 
         controller.prepare(&budget(50), components("current"), 1);
 
-        assert_eq!(controller.pending_actions(), &[request]);
+        assert_eq!(controller.pending_actions().len(), 1);
+        assert_eq!(controller.pending_actions()[0], request);
         assert!(controller.manifest().revision.0 > request.base_revision.0);
     }
 
@@ -551,11 +606,12 @@ mod tests {
             .request_action(ContextActionKind::Export, ContextRevision::INITIAL)
             .expect("request is accepted");
 
-        assert_eq!(controller.take_pending_actions(), vec![request]);
+        let taken = controller.take_pending_actions();
+        assert_eq!(taken, vec![request.clone()]);
         assert!(controller.pending_actions().is_empty());
 
         controller.record_action_outcome(
-            request,
+            request.clone(),
             ContextActionOutcome::Completed {
                 detail: "exported".to_string(),
             },
