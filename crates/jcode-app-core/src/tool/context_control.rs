@@ -1,11 +1,62 @@
-use super::{
-    ContextControllerBindings, Tool, ToolContext, ToolOutput, context_controller_for_session,
-};
+use super::{Tool, ToolContext, ToolOutput, skill_state};
 use crate::context_controller::ContextController;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock, Weak};
+
+pub(crate) type ContextControllerHandle = Arc<StdMutex<ContextController>>;
+pub(crate) type ContextControllerWeak = Weak<StdMutex<ContextController>>;
+pub(crate) type ContextControllerBindings = Arc<StdRwLock<HashMap<String, ContextControllerWeak>>>;
+
+#[derive(Clone)]
+pub(crate) struct ContextTools {
+    bindings: ContextControllerBindings,
+}
+
+impl ContextTools {
+    pub(crate) fn new() -> Self {
+        Self {
+            bindings: Arc::new(StdRwLock::new(HashMap::new())),
+        }
+    }
+
+    pub(crate) fn register(&self, tools: &mut HashMap<String, Arc<dyn Tool>>) {
+        tools.insert(
+            "context_control".into(),
+            Arc::new(ContextControlTool::new(self.bindings.clone())),
+        );
+        tools.insert(
+            "skill_state".into(),
+            Arc::new(skill_state::SkillStateTool::new(self.bindings.clone())),
+        );
+    }
+
+    pub(crate) fn bind(&self, session_id: &str, controller: ContextControllerWeak) {
+        let Ok(mut bindings) = self.bindings.write() else {
+            crate::logging::warn("Context controller bindings lock poisoned");
+            return;
+        };
+        bindings.retain(|_, current| current.strong_count() > 0);
+        bindings.insert(session_id.to_string(), controller);
+    }
+}
+
+pub(crate) fn context_controller_for_session(
+    bindings: &ContextControllerBindings,
+    session_id: &str,
+) -> Result<ContextControllerHandle> {
+    let mut bindings = bindings
+        .write()
+        .map_err(|_| anyhow::anyhow!("context controller bindings lock poisoned"))?;
+    bindings.retain(|_, controller| controller.strong_count() > 0);
+    bindings
+        .get(session_id)
+        .and_then(Weak::upgrade)
+        .ok_or_else(|| anyhow::anyhow!("context controller is not bound for this session"))
+}
 
 /// Read-only model surface for the provider-facing context manifest.
 pub(crate) struct ContextControlTool {
@@ -122,6 +173,7 @@ impl Tool for ContextControlTool {
 mod tests {
     use super::*;
     use crate::context::{ContextBudget, ContextComponentHashes};
+    use crate::tool::{Registry, tests::MockProvider};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, RwLock};
 
@@ -155,6 +207,30 @@ mod tests {
             controller,
             tool_context(session_id),
         )
+    }
+
+    #[tokio::test]
+    async fn registry_registers_context_tools_and_schemas() {
+        let registry = Registry::new(Arc::new(MockProvider)).await;
+        let definitions = registry.definitions(None).await;
+        for (name, actions) in [
+            ("context_control", json!(["status", "preview"])),
+            ("skill_state", json!(["get_state", "propose_patch"])),
+        ] {
+            let schema = &definitions
+                .iter()
+                .find(|definition| definition.name == name)
+                .expect("tool definition")
+                .input_schema;
+            assert_eq!(schema["additionalProperties"], false);
+            assert_eq!(schema["properties"]["action"]["enum"], actions);
+            if name == "skill_state" {
+                assert_eq!(
+                    schema["properties"]["patch"]["properties"]["expected_revision"]["type"],
+                    "integer"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use super::{
-    ContextControllerBindings, Tool, ToolContext, ToolOutput, context_controller_for_session,
+    Tool, ToolContext, ToolOutput,
+    context_control::{ContextControllerBindings, context_controller_for_session},
 };
 use crate::execution_state::ExecutionStatePatch;
 use anyhow::Result;
