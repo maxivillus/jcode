@@ -54,6 +54,7 @@ impl Agent {
         self.invalidate_provider_context("context prune");
         self.locked_tools = None;
         self.reset_tool_output_tracking();
+        self.note_transcript_mutation();
         self.persist_session_best_effort("context prune");
         let after_tokens = self.provider_token_estimate();
         crate::logging::info(&format!(
@@ -81,6 +82,7 @@ impl Agent {
         self.cache_tracker.reset();
         self.locked_tools = None;
         self.reset_tool_output_tracking();
+        self.note_transcript_mutation();
         self.persist_session_best_effort("context prune undo");
         ContextActionOutcome::Completed {
             detail: "restored the transcript from before the last prune".to_string(),

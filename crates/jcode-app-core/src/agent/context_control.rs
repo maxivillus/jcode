@@ -111,6 +111,31 @@ impl Agent {
         self.last_provider_static_prompt_hash = Some(current_hash);
     }
 
+    /// Сбрасывает resumable provider session, когда tools, skills или
+    /// AGENTS snapshot изменились с прошлого preflight.
+    ///
+    /// Static prompt уже отслеживается отдельно. Без этой проверки upstream
+    /// продолжал бы разговор со старым набором инструментов: провайдер может
+    /// вернуть вызов инструмента, которого в новом наборе уже нет.
+    pub(super) fn refresh_components_binding(&mut self, components: &ContextComponentHashes) {
+        let fingerprint = format!(
+            "{}|{}|{}",
+            components.agents.as_deref().unwrap_or(""),
+            components.skills.as_deref().unwrap_or(""),
+            components.tools.as_deref().unwrap_or(""),
+        );
+        let has_provider_session =
+            self.provider_session_id.is_some() || self.session.provider_session_id.is_some();
+        let changed = self
+            .last_provider_components_fingerprint
+            .as_deref()
+            .is_some_and(|previous| previous != fingerprint);
+        if changed && has_provider_session {
+            self.invalidate_provider_context("tools, skills or AGENTS snapshot changed");
+        }
+        self.last_provider_components_fingerprint = Some(fingerprint);
+    }
+
     /// Снимает provider-facing snapshot перед запросом.
     ///
     /// Здесь проверяется привязка static prompt к provider session. При
@@ -149,6 +174,7 @@ impl Agent {
             messages: Some(serialized_fingerprint(messages)),
             ..ContextComponentHashes::default()
         };
+        self.refresh_components_binding(&components);
         let estimated_input_tokens = split_prompt
             .estimated_tokens()
             .saturating_add(ToolDefinition::aggregate_prompt_token_estimate(tools))

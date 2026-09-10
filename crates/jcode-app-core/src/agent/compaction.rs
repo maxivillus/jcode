@@ -163,6 +163,7 @@ impl Agent {
         self.locked_tools = None;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
+        self.note_transcript_mutation();
 
         logging::warn(&format!(
             "Context limit exceeded; auto-compacted and retrying (dropped {} messages, usage was {:.1}%)",
@@ -218,6 +219,7 @@ impl Agent {
                 self.locked_tools = None;
                 self.provider_session_id = None;
                 self.session.provider_session_id = None;
+                self.note_transcript_mutation();
                 logging::info(&format!(
                     "Model-requested compaction dropped {dropped} messages (usage was {usage_pct:.1}%)"
                 ));

@@ -247,12 +247,19 @@ pub struct Agent {
     agents_md_snapshot: (Option<String>, crate::prompt::ContextInfo),
     /// Хеш последнего static prompt, связанный с provider session.
     last_provider_static_prompt_hash: Option<String>,
+    /// AGENTS, skills and tools hashes seen at the last preflight.
+    last_provider_components_fingerprint: Option<String>,
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
     /// One-step undo snapshot captured before the most recent rewind.
     rewind_undo_snapshot: Option<RewindUndoSnapshot>,
     /// История и provider-сессия до последней обратимой обрезки контекста.
     prune_undo_snapshot: Option<context_prune::ContextPruneUndoSnapshot>,
+    /// Момент последней мутации транскрипта (rewind, prune, compact).
+    ///
+    /// Память, посчитанная до этой мутации, описывает уже несуществующий
+    /// транскрипт и не должна инжектироваться.
+    last_transcript_mutation_at: Option<std::time::Instant>,
     /// Channel for tools to request stdin input from the user
     stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::tool::StdinInputRequest>>,
     /// Canonical reducer-backed view of runtime provider/model selection.
@@ -333,9 +340,11 @@ impl Agent {
             system_prompt_override: None,
             agents_md_snapshot,
             last_provider_static_prompt_hash: None,
+            last_provider_components_fingerprint: None,
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
             prune_undo_snapshot: None,
+            last_transcript_mutation_at: None,
             stdin_request_tx: None,
             provider_runtime_state: ProviderRuntimeState::observed(initial_provider_model),
             inline_output_tap: false,
@@ -636,6 +645,7 @@ impl Agent {
             .bind_context_controller(&self.session.id, Arc::downgrade(&self.context_controller));
         self.mcp_late_register_resolved = false;
         self.last_provider_static_prompt_hash = None;
+        self.last_provider_components_fingerprint = None;
         self.rewind_undo_snapshot = None;
     }
 

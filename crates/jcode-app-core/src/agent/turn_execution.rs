@@ -223,6 +223,7 @@ impl Agent {
         if !had_provider_session {
             self.persist_session_best_effort("provider session reset");
         }
+        self.note_transcript_mutation();
     }
 
     /// Rewind the conversation to a 1-based visible transcript message index.
@@ -261,6 +262,7 @@ impl Agent {
         self.cache_tracker.reset();
         self.locked_tools = None;
         self.reset_tool_output_tracking();
+        self.note_transcript_mutation();
         self.persist_session_best_effort("conversation rewind");
         Ok(removed)
     }
@@ -279,6 +281,7 @@ impl Agent {
         self.cache_tracker.reset();
         self.locked_tools = None;
         self.reset_tool_output_tracking();
+        self.note_transcript_mutation();
         self.persist_session_best_effort("conversation rewind undo");
         Ok(restored)
     }
