@@ -2,7 +2,7 @@ use super::{
     Tool, ToolContext, ToolOutput,
     context_control::{ContextControllerBindings, context_controller_for_session},
 };
-use crate::execution_state::ExecutionStatePatch;
+use crate::execution_state::{ExecutionStatePatch, PatchValue};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -25,7 +25,33 @@ struct SkillStateInput {
     action: String,
     #[serde(default)]
     patch: Option<Value>,
+    #[serde(default)]
+    observation: Option<ObservationInput>,
+    #[serde(default)]
+    expected: ReconcileExpectation,
 }
+
+/// Наблюдение из актуального источника, добавляемое в evidence.
+#[derive(Debug, Deserialize)]
+struct ObservationInput {
+    text: String,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// Ожидаемые значения для сверки без мутации состояния.
+#[derive(Debug, Default, Deserialize)]
+struct ReconcileExpectation {
+    #[serde(default)]
+    phase: Option<String>,
+    #[serde(default)]
+    next_action: Option<String>,
+    #[serde(default)]
+    source_revision: Option<String>,
+}
+
+const MAX_OBSERVATION_CHARS: usize = 500;
+const MAX_EVIDENCE_REFS: usize = 64;
 
 fn default_action() -> String {
     "get_state".to_string()
@@ -88,7 +114,7 @@ impl Tool for SkillStateTool {
     }
 
     fn description(&self) -> &str {
-        "Read or atomically patch bounded execution state."
+        "Read, patch, observe and reconcile bounded execution state."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -99,10 +125,40 @@ impl Tool for SkillStateTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["get_state", "propose_patch"],
-                    "description": "Read state or propose one validated state patch.",
+                    "enum": [
+                        "get_state",
+                        "propose_patch",
+                        "record_observation",
+                        "retrieve_evidence",
+                        "reconcile"
+                    ],
+                    "description": "Read state, patch it, record an observation, list evidence or reconcile expectations.",
                 },
                 "patch": patch_schema(),
+                "observation": {
+                    "type": "object",
+                    "required": ["text"],
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "Observed fact taken from a current source.",
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "Where the observation came from.",
+                        },
+                    },
+                    "additionalProperties": false,
+                },
+                "expected": {
+                    "type": "object",
+                    "properties": {
+                        "phase": nullable_text_schema("Expected phase."),
+                        "next_action": nullable_text_schema("Expected next action."),
+                        "source_revision": nullable_text_schema("Expected source revision."),
+                    },
+                    "additionalProperties": false,
+                },
             },
             "additionalProperties": false,
         })
@@ -144,6 +200,99 @@ impl Tool for SkillStateTool {
                     "state": state,
                 })
             }
+            "record_observation" => {
+                let observation = params.observation.ok_or_else(|| {
+                    anyhow::anyhow!("observation is required for record_observation")
+                })?;
+                let text = observation.text.trim();
+                if text.is_empty() {
+                    anyhow::bail!("observation text must not be empty");
+                }
+                if text.chars().count() > MAX_OBSERVATION_CHARS {
+                    anyhow::bail!("observation text exceeds {MAX_OBSERVATION_CHARS} characters");
+                }
+                let entry = match observation
+                    .source
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|source| !source.is_empty())
+                {
+                    Some(source) => format!("{source}: {text}"),
+                    None => text.to_string(),
+                };
+                let (schema, revision, mut evidence) = {
+                    let state = controller.execution_state();
+                    let evidence: Vec<String> =
+                        state.evidence_refs.iter().flatten().cloned().collect();
+                    (state.state_schema.clone(), state.revision, evidence)
+                };
+                if evidence.len() >= MAX_EVIDENCE_REFS {
+                    anyhow::bail!(
+                        "evidence list is full ({MAX_EVIDENCE_REFS}); reconcile it before adding more"
+                    );
+                }
+                evidence.push(entry);
+                let mut patch = ExecutionStatePatch::new(schema, revision);
+                patch.evidence_refs = Some(PatchValue::Set(evidence));
+                let revision = controller.apply_execution_state_patch(&patch)?;
+                let state = controller.execution_state();
+                json!({
+                    "action": "record_observation",
+                    "applied": true,
+                    "mutated": true,
+                    "revision": revision,
+                    "evidence_count": state.evidence_refs.as_ref().map_or(0, Vec::len),
+                })
+            }
+            "retrieve_evidence" => {
+                let state = controller.execution_state();
+                let evidence: Vec<String> = state.evidence_refs.iter().flatten().cloned().collect();
+                json!({
+                    "action": "retrieve_evidence",
+                    "mutated": false,
+                    "revision": state.revision,
+                    "source_revision": state.source_revision,
+                    "owner": state.owner,
+                    "lease": state.lease,
+                    "evidence_refs": evidence,
+                })
+            }
+            "reconcile" => {
+                let expected = params.expected;
+                let state = controller.execution_state();
+                let mut differences: Vec<String> = Vec::new();
+                if let Some(phase) = expected.phase.as_deref()
+                    && state.phase.as_deref() != Some(phase)
+                {
+                    differences.push(format!(
+                        "phase: expected {phase:?}, actual {:?}",
+                        state.phase
+                    ));
+                }
+                if let Some(next_action) = expected.next_action.as_deref()
+                    && state.next_action.as_deref() != Some(next_action)
+                {
+                    differences.push(format!(
+                        "next_action: expected {next_action:?}, actual {:?}",
+                        state.next_action
+                    ));
+                }
+                if let Some(source_revision) = expected.source_revision.as_deref()
+                    && state.source_revision.as_deref() != Some(source_revision)
+                {
+                    differences.push(format!(
+                        "source_revision: expected {source_revision:?}, actual {:?}",
+                        state.source_revision
+                    ));
+                }
+                json!({
+                    "action": "reconcile",
+                    "mutated": false,
+                    "revision": state.revision,
+                    "matches": differences.is_empty(),
+                    "differences": differences,
+                })
+            }
             action => anyhow::bail!("unsupported skill_state action: {action}"),
         };
 
@@ -154,7 +303,7 @@ impl Tool for SkillStateTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::execution_state::{ExecutionStateRevision, PatchValue};
+    use crate::execution_state::{ExecutionStatePatch, ExecutionStateRevision, PatchValue};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, RwLock};
 
@@ -213,7 +362,17 @@ mod tests {
         assert_eq!(schema["additionalProperties"], json!(false));
         assert_eq!(
             schema["properties"]["action"]["enum"],
-            json!(["get_state", "propose_patch"])
+            json!([
+                "get_state",
+                "propose_patch",
+                "record_observation",
+                "retrieve_evidence",
+                "reconcile"
+            ])
+        );
+        assert_eq!(
+            schema["properties"]["observation"]["required"],
+            json!(["text"])
         );
         assert_eq!(
             schema["properties"]["patch"]["required"],
@@ -354,6 +513,155 @@ mod tests {
                 .execution_state()
                 .revision,
             ExecutionStateRevision::INITIAL
+        );
+    }
+
+    #[tokio::test]
+    async fn record_observation_appends_evidence_and_advances_revision() {
+        let (tool, controller, ctx) = bound_tool("skill-observe");
+
+        let result = tool
+            .execute(
+                json!({
+                    "action": "record_observation",
+                    "observation": {"text": "tests pass", "source": "cargo test"}
+                }),
+                ctx,
+            )
+            .await
+            .expect("observation should be recorded");
+        let metadata = result.metadata.expect("metadata");
+
+        assert_eq!(metadata["mutated"], json!(true));
+        assert_eq!(metadata["revision"], json!(1));
+        assert_eq!(metadata["evidence_count"], json!(1));
+        let controller = controller.lock().expect("controller lock");
+        let evidence = controller
+            .execution_state()
+            .evidence_refs
+            .clone()
+            .unwrap_or_default();
+        assert_eq!(evidence, vec!["cargo test: tests pass".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn record_observation_rejects_empty_and_oversized_text() {
+        let (tool, _controller, ctx) = bound_tool("skill-observe-invalid");
+
+        let error = tool
+            .execute(
+                json!({"action": "record_observation", "observation": {"text": "   "}}),
+                ctx.clone(),
+            )
+            .await
+            .expect_err("empty text must be rejected");
+        assert!(
+            error.to_string().contains("must not be empty"),
+            "got: {error}"
+        );
+
+        let error = tool
+            .execute(
+                json!({
+                    "action": "record_observation",
+                    "observation": {"text": "x".repeat(MAX_OBSERVATION_CHARS + 1)}
+                }),
+                ctx,
+            )
+            .await
+            .expect_err("oversized text must be rejected");
+        assert!(error.to_string().contains("exceeds"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn retrieve_evidence_is_read_only() {
+        let (tool, controller, ctx) = bound_tool("skill-evidence");
+        {
+            let mut controller = controller.lock().expect("controller lock");
+            let state = controller.execution_state();
+            let mut patch = ExecutionStatePatch::new(state.state_schema.clone(), state.revision);
+            patch.evidence_refs = Some(PatchValue::Set(vec!["file:line".to_string()]));
+            patch.source_revision = Some(PatchValue::Set("abc123".to_string()));
+            controller
+                .apply_execution_state_patch(&patch)
+                .expect("patch should apply");
+        }
+        let before = controller
+            .lock()
+            .expect("controller lock")
+            .execution_state()
+            .clone();
+
+        let result = tool
+            .execute(json!({"action": "retrieve_evidence"}), ctx)
+            .await
+            .expect("retrieve should succeed");
+        let metadata = result.metadata.expect("metadata");
+
+        assert_eq!(metadata["mutated"], json!(false));
+        assert_eq!(metadata["source_revision"], json!("abc123"));
+        assert_eq!(metadata["evidence_refs"], json!(["file:line"]));
+        assert_eq!(
+            controller
+                .lock()
+                .expect("controller lock")
+                .execution_state(),
+            &before
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_reports_differences_without_mutation() {
+        let (tool, controller, ctx) = bound_tool("skill-reconcile");
+        {
+            let mut controller = controller.lock().expect("controller lock");
+            let state = controller.execution_state();
+            let mut patch = ExecutionStatePatch::new(state.state_schema.clone(), state.revision);
+            patch.phase = Some(PatchValue::Set("build".to_string()));
+            controller
+                .apply_execution_state_patch(&patch)
+                .expect("patch should apply");
+        }
+        let before = controller
+            .lock()
+            .expect("controller lock")
+            .execution_state()
+            .clone();
+
+        let result = tool
+            .execute(
+                json!({"action": "reconcile", "expected": {"phase": "test"}}),
+                ctx.clone(),
+            )
+            .await
+            .expect("reconcile should succeed");
+        let metadata = result.metadata.expect("metadata");
+        assert_eq!(metadata["matches"], json!(false));
+        assert_eq!(metadata["mutated"], json!(false));
+        let differences = metadata["differences"].as_array().expect("differences");
+        assert_eq!(differences.len(), 1);
+        assert!(
+            differences[0]
+                .as_str()
+                .unwrap_or_default()
+                .contains("phase"),
+            "got: {differences:?}"
+        );
+
+        let result = tool
+            .execute(
+                json!({"action": "reconcile", "expected": {"phase": "build"}}),
+                ctx,
+            )
+            .await
+            .expect("reconcile should succeed");
+        assert_eq!(result.metadata.expect("metadata")["matches"], json!(true));
+        assert_eq!(
+            controller
+                .lock()
+                .expect("controller lock")
+                .execution_state(),
+            &before
         );
     }
 }
