@@ -2193,10 +2193,8 @@ mod tests {
         assert!(schema.contains("Missing capability category; infer it from the user's goal."));
         assert!(schema.contains("Search/details/select/suggest"));
         assert!(schema.contains("details does not select"));
-        assert!(schema.contains("tool defaults to select"));
-        assert!(schema.contains("off-catalog recorded"));
-        assert!(schema.contains("share with providers"));
-        assert!(schema.contains("without secrets or personal data"));
+        assert!(schema.contains("tool defaults to select; off-catalog recorded"));
+        assert!(schema.contains("share with providers; use fresh text"));
         assert!(schema.contains("Why the candidate is relevant"));
         assert!(schema.contains("Public product for details/select"));
         assert!(schema.contains("select records it and returns setup"));
