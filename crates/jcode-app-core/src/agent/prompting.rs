@@ -34,6 +34,7 @@ impl Agent {
         } else {
             None
         };
+        let pending = pending.filter(|memory| self.memory_matches_transcript(memory));
 
         // Use the persistent memory-agent pipeline as the single source of truth.
         // Running both this and the legacy MemoryManager background retrieval path
@@ -53,6 +54,30 @@ impl Agent {
         }
 
         pending
+    }
+
+    /// Отмечает мутацию транскрипта, после которой ранее посчитанная
+    /// память описывает уже несуществующий контекст.
+    pub(super) fn note_transcript_mutation(&mut self) {
+        self.last_transcript_mutation_at = Some(std::time::Instant::now());
+    }
+
+    /// Проверяет, что результат памяти относится к текущему транскрипту.
+    ///
+    /// Результат отбрасывается, если он устарел по времени или посчитан до
+    /// последней мутации транскрипта (rewind, prune, compact).
+    pub(super) fn memory_matches_transcript(&self, memory: &crate::memory::PendingMemory) -> bool {
+        if !memory.is_fresh() {
+            logging::info("Pending memory expired before injection; dropping it");
+            return false;
+        }
+        match self.last_transcript_mutation_at {
+            Some(mutated_at) if memory.computed_at < mutated_at => {
+                logging::info("Pending memory predates a transcript mutation; dropping it");
+                false
+            }
+            _ => true,
+        }
     }
 
     fn append_current_turn_system_reminder(&self, split: &mut crate::prompt::SplitSystemPrompt) {

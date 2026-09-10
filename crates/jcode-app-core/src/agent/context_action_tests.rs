@@ -105,6 +105,32 @@ fn count_images(agent: &Agent) -> usize {
         .count()
 }
 
+fn pending_memory(computed_at: std::time::Instant) -> crate::memory::PendingMemory {
+    crate::memory::PendingMemory {
+        prompt: "# Memory".to_string(),
+        display_prompt: None,
+        computed_at,
+        count: 1,
+        memory_ids: vec!["mem-1".to_string()],
+    }
+}
+
+#[tokio::test]
+async fn memory_computed_before_a_transcript_mutation_is_rejected() {
+    let mut agent = test_agent().await;
+    let before_mutation = pending_memory(std::time::Instant::now());
+    assert!(agent.memory_matches_transcript(&before_mutation));
+
+    agent.note_transcript_mutation();
+
+    assert!(
+        !agent.memory_matches_transcript(&before_mutation),
+        "memory computed before a transcript mutation must be rejected"
+    );
+    let after_mutation = pending_memory(std::time::Instant::now());
+    assert!(agent.memory_matches_transcript(&after_mutation));
+}
+
 #[tokio::test]
 async fn reset_provider_action_clears_session_on_turn_boundary() {
     let mut agent = test_agent().await;
@@ -361,4 +387,48 @@ async fn prune_turns_keeps_recent_history_and_undo_restores() {
     agent.apply_pending_context_actions();
 
     assert_eq!(agent.session.messages.len(), before);
+}
+
+#[tokio::test]
+async fn tools_change_invalidates_resumable_provider_session() {
+    let mut agent = test_agent().await;
+    let baseline =
+        ContextComponentHashes::from_texts(None, None, None, None, Some("tools-a"), None);
+    agent.provider_session_id = Some("provider-session".to_string());
+    agent.session.provider_session_id = Some("provider-session".to_string());
+
+    agent.refresh_components_binding(&baseline);
+    assert!(
+        agent.provider_session_id.is_some(),
+        "the first binding must not drop an existing session"
+    );
+
+    agent.refresh_components_binding(&baseline);
+    assert!(
+        agent.provider_session_id.is_some(),
+        "unchanged tools must keep the resumable session"
+    );
+
+    let changed = ContextComponentHashes::from_texts(None, None, None, None, Some("tools-b"), None);
+    agent.refresh_components_binding(&changed);
+
+    assert!(agent.provider_session_id.is_none());
+    assert!(agent.session.provider_session_id.is_none());
+}
+
+#[tokio::test]
+async fn skills_change_invalidates_resumable_provider_session() {
+    let mut agent = test_agent().await;
+    let baseline =
+        ContextComponentHashes::from_texts(None, None, Some("skills-a"), None, None, None);
+    agent.refresh_components_binding(&baseline);
+    agent.provider_session_id = Some("provider-session".to_string());
+    agent.session.provider_session_id = Some("provider-session".to_string());
+
+    let changed =
+        ContextComponentHashes::from_texts(None, None, Some("skills-b"), None, None, None);
+    agent.refresh_components_binding(&changed);
+
+    assert!(agent.provider_session_id.is_none());
+    assert!(agent.session.provider_session_id.is_none());
 }
