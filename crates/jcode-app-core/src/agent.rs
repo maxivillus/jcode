@@ -2,6 +2,7 @@
 
 mod compaction;
 mod context_control;
+mod context_prune;
 mod environment;
 mod inline_tail;
 mod interrupts;
@@ -250,6 +251,8 @@ pub struct Agent {
     memory_enabled: bool,
     /// One-step undo snapshot captured before the most recent rewind.
     rewind_undo_snapshot: Option<RewindUndoSnapshot>,
+    /// История и provider-сессия до последней обратимой обрезки контекста.
+    prune_undo_snapshot: Option<context_prune::ContextPruneUndoSnapshot>,
     /// Channel for tools to request stdin input from the user
     stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::tool::StdinInputRequest>>,
     /// Canonical reducer-backed view of runtime provider/model selection.
@@ -332,6 +335,7 @@ impl Agent {
             last_provider_static_prompt_hash: None,
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
+            prune_undo_snapshot: None,
             stdin_request_tx: None,
             provider_runtime_state: ProviderRuntimeState::observed(initial_provider_model),
             inline_output_tap: false,

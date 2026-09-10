@@ -1,6 +1,8 @@
 use super::{Tool, ToolContext, ToolOutput, skill_state};
 use crate::context::ContextRevision;
-use crate::context_controller::{ContextActionKind, ContextController};
+use crate::context_controller::{
+    ContextActionKind, ContextController, ContextPruneKind, ContextPruneSpec,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -78,6 +80,16 @@ struct ContextControlInput {
     /// действий, которые меняют состояние на границе turn-а.
     #[serde(default)]
     expected_revision: Option<u64>,
+    /// Параметры структурной обрезки для действия `prune`.
+    #[serde(default)]
+    prune: Option<ContextPruneInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContextPruneInput {
+    kind: String,
+    #[serde(default)]
+    keep_recent: Option<usize>,
 }
 
 fn default_action() -> String {
@@ -170,13 +182,31 @@ impl Tool for ContextControlTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["status", "preview", "refresh", "compact", "reset-provider", "export"],
+                    "enum": ["status", "preview", "refresh", "compact", "reset-provider", "export", "prune", "undo-prune"],
                     "description": "Operation to perform; queued actions apply on the next turn.",
                 },
                 "expected_revision": {
                     "type": "integer",
                     "minimum": 0,
                     "description": "Revision from status/preview; required for queued actions.",
+                },
+                "prune": {
+                    "type": "object",
+                    "description": "Prune parameters for the prune action.",
+                    "required": ["kind"],
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["images", "tool-results", "turns"],
+                            "description": "Structural data to prune.",
+                        },
+                        "keep_recent": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "How many recent items to keep.",
+                        },
+                    },
+                    "additionalProperties": false,
                 },
             },
             "additionalProperties": false,
@@ -223,6 +253,38 @@ impl Tool for ContextControlTool {
                 "execution_state": execution_state_metadata(&controller),
                 "actions": actions_metadata(&controller),
             }),
+            "prune" | "undo-prune" => {
+                let expected = params.expected_revision.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "expected_revision is required for `{action}`; read status first"
+                    )
+                })?;
+                let request = if action == "prune" {
+                    let input = params.prune.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "prune spec is required for `prune`; pass kind images|tool-results|turns"
+                        )
+                    })?;
+                    let kind = match input.kind.as_str() {
+                        "images" => ContextPruneKind::Images,
+                        "tool-results" => ContextPruneKind::ToolResults,
+                        "turns" => ContextPruneKind::Turns,
+                        other => anyhow::bail!("unsupported prune kind: {other}"),
+                    };
+                    let mut spec = ContextPruneSpec::new(kind);
+                    if let Some(keep_recent) = input.keep_recent {
+                        spec = spec.keep_recent(keep_recent);
+                    }
+                    controller
+                        .request_prune(spec, ContextRevision(expected))
+                        .map_err(|error| anyhow::anyhow!("{error}"))?
+                } else {
+                    controller
+                        .request_action(ContextActionKind::UndoPrune, ContextRevision(expected))
+                        .map_err(|error| anyhow::anyhow!("{error}"))?
+                };
+                queued_action_metadata(action, &controller, request)
+            }
             _ => anyhow::bail!("unsupported context_control action: {action}"),
         };
 
@@ -283,7 +345,9 @@ mod tests {
                     "refresh",
                     "compact",
                     "reset-provider",
-                    "export"
+                    "export",
+                    "prune",
+                    "undo-prune"
                 ]),
             ),
             ("skill_state", json!(["get_state", "propose_patch"])),
@@ -318,12 +382,18 @@ mod tests {
                 "refresh",
                 "compact",
                 "reset-provider",
-                "export"
+                "export",
+                "prune",
+                "undo-prune"
             ])
         );
         assert_eq!(
             schema["properties"]["expected_revision"]["type"],
             json!("integer")
+        );
+        assert_eq!(
+            schema["properties"]["prune"]["properties"]["kind"]["enum"],
+            json!(["images", "tool-results", "turns"])
         );
     }
 
@@ -398,7 +468,7 @@ mod tests {
         let (tool, _controller, ctx) = bound_tool("context-invalid");
 
         let error = tool
-            .execute(json!({"action": "prune"}), ctx)
+            .execute(json!({"action": "clear"}), ctx)
             .await
             .expect_err("unknown action must be rejected");
 
@@ -553,5 +623,97 @@ mod tests {
         );
         assert_eq!(metadata["actions"]["pending"][0]["sequence"], json!(1));
         assert!(metadata["actions"]["last"].is_null());
+    }
+
+    #[tokio::test]
+    async fn prune_requires_spec_and_known_kind() {
+        let (tool, controller, ctx) = bound_tool("context-prune-validation");
+        let revision = controller
+            .lock()
+            .expect("controller lock")
+            .manifest()
+            .revision
+            .0;
+
+        let error = tool
+            .execute(
+                json!({"action": "prune", "expected_revision": revision}),
+                ctx.clone(),
+            )
+            .await
+            .expect_err("missing prune spec must be rejected");
+        assert!(
+            error.to_string().contains("prune spec is required"),
+            "got: {error}"
+        );
+
+        let error = tool
+            .execute(
+                json!({
+                    "action": "prune",
+                    "expected_revision": revision,
+                    "prune": {"kind": "threads"}
+                }),
+                ctx,
+            )
+            .await
+            .expect_err("unknown prune kind must be rejected");
+        assert!(
+            error.to_string().contains("unsupported prune kind"),
+            "got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_spec_is_queued_with_keep_recent() {
+        let (tool, controller, ctx) = bound_tool("context-prune-queued");
+        let revision = controller
+            .lock()
+            .expect("controller lock")
+            .manifest()
+            .revision
+            .0;
+
+        let result = tool
+            .execute(
+                json!({
+                    "action": "prune",
+                    "expected_revision": revision,
+                    "prune": {"kind": "tool-results", "keep_recent": 3}
+                }),
+                ctx,
+            )
+            .await
+            .expect("fresh prune request is accepted");
+        let metadata = result.metadata.expect("metadata");
+
+        assert_eq!(metadata["queued"], json!(true));
+        assert_eq!(metadata["mutated"], json!(false));
+        assert_eq!(metadata["request"]["action"], json!("prune"));
+        assert_eq!(metadata["request"]["prune"]["kind"], json!("tool-results"));
+        assert_eq!(metadata["request"]["prune"]["keep_recent"], json!(3));
+    }
+
+    #[tokio::test]
+    async fn undo_prune_is_queued() {
+        let (tool, controller, ctx) = bound_tool("context-undo-prune");
+        let revision = controller
+            .lock()
+            .expect("controller lock")
+            .manifest()
+            .revision
+            .0;
+
+        let result = tool
+            .execute(
+                json!({"action": "undo-prune", "expected_revision": revision}),
+                ctx,
+            )
+            .await
+            .expect("fresh undo request is accepted");
+        let metadata = result.metadata.expect("metadata");
+
+        assert_eq!(metadata["queued"], json!(true));
+        assert_eq!(metadata["request"]["action"], json!("undo-prune"));
     }
 }
