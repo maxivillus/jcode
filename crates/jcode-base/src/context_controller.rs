@@ -63,6 +63,7 @@ pub enum ContextActionKind {
 #[serde(rename_all = "kebab-case")]
 pub enum ContextPruneKind {
     Images,
+    MemoryInjections,
     ToolResults,
     Turns,
 }
