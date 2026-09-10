@@ -43,12 +43,77 @@ impl ContextPreflightPlan {
     }
 }
 
+/// Действие над контекстом, запрошенное моделью.
+///
+/// Запрос не исполняется в момент вызова: runtime применяет его на
+/// безопасной границе turn-а, когда провайдерский запрос ещё не отправлен.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContextActionKind {
+    Refresh,
+    Compact,
+    ResetProvider,
+    Export,
+}
+
+/// Проверенный запрос действия с revision, на которой он основан.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextActionRequest {
+    pub action: ContextActionKind,
+    pub base_revision: ContextRevision,
+    pub sequence: u64,
+}
+
+/// Итог применения запроса на границе turn-а.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum ContextActionOutcome {
+    Completed { detail: String },
+    Skipped { reason: String },
+    Failed { reason: String },
+    Rejected { reason: String },
+}
+
+/// Последний применённый запрос и его результат.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextActionRecord {
+    pub request: ContextActionRequest,
+    pub outcome: ContextActionOutcome,
+    pub applied_revision: ContextRevision,
+}
+
+/// Отказ в постановке запроса действия.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextActionError {
+    StaleRevision {
+        expected: ContextRevision,
+        current: ContextRevision,
+    },
+}
+
+impl std::fmt::Display for ContextActionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StaleRevision { expected, current } => write!(
+                formatter,
+                "context revision changed from {} to {}; read status again",
+                expected.0, current.0
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ContextActionError {}
+
 #[derive(Debug, Clone, Default)]
 pub struct ContextController {
     manifest: ContextManifest,
     execution_state: ExecutionState,
     last_budget: Option<ContextBudget>,
     last_plan: Option<ContextPreflightPlan>,
+    pending_actions: Vec<ContextActionRequest>,
+    last_action: Option<ContextActionRecord>,
+    next_action_sequence: u64,
 }
 
 impl ContextController {
@@ -58,6 +123,9 @@ impl ContextController {
             execution_state: ExecutionState::default(),
             last_budget: None,
             last_plan: None,
+            pending_actions: Vec::new(),
+            last_action: None,
+            next_action_sequence: 0,
         }
     }
 
@@ -72,6 +140,9 @@ impl ContextController {
             execution_state,
             last_budget: None,
             last_plan: None,
+            pending_actions: Vec::new(),
+            last_action: None,
+            next_action_sequence: 0,
         })
     }
 
@@ -92,6 +163,67 @@ impl ContextController {
     /// Возвращает план последнего provider preflight, если он уже выполнялся.
     pub fn last_plan(&self) -> Option<&ContextPreflightPlan> {
         self.last_plan.as_ref()
+    }
+
+    /// Ставит запрос действия, проверяя revision, на которой он основан.
+    ///
+    /// Повторный запрос того же действия, пока он ещё не применён, возвращает
+    /// уже поставленный запрос: повторный вызов модели идемпотентен.
+    pub fn request_action(
+        &mut self,
+        action: ContextActionKind,
+        expected_revision: ContextRevision,
+    ) -> Result<ContextActionRequest, ContextActionError> {
+        let current = self.manifest.revision;
+        if expected_revision != current {
+            return Err(ContextActionError::StaleRevision {
+                expected: expected_revision,
+                current,
+            });
+        }
+        if let Some(existing) = self
+            .pending_actions
+            .iter()
+            .find(|pending| pending.action == action)
+        {
+            return Ok(*existing);
+        }
+        self.next_action_sequence = self.next_action_sequence.saturating_add(1);
+        let request = ContextActionRequest {
+            action,
+            base_revision: current,
+            sequence: self.next_action_sequence,
+        };
+        self.pending_actions.push(request);
+        Ok(request)
+    }
+
+    /// Запросы, ожидающие безопасной границы turn-а.
+    pub fn pending_actions(&self) -> &[ContextActionRequest] {
+        &self.pending_actions
+    }
+
+    /// Забирает очередь запросов: runtime исполняет её до следующего запроса.
+    pub fn take_pending_actions(&mut self) -> Vec<ContextActionRequest> {
+        std::mem::take(&mut self.pending_actions)
+    }
+
+    /// Запоминает результат применения запроса для последующих status/preview.
+    pub fn record_action_outcome(
+        &mut self,
+        request: ContextActionRequest,
+        outcome: ContextActionOutcome,
+    ) {
+        self.last_action = Some(ContextActionRecord {
+            request,
+            outcome,
+            applied_revision: self.manifest.revision,
+        });
+    }
+
+    /// Последний применённый запрос действия, если он был.
+    pub fn last_action(&self) -> Option<&ContextActionRecord> {
+        self.last_action.as_ref()
     }
 
     /// Проверяет patch без изменения state controller.
@@ -355,5 +487,81 @@ mod tests {
         assert_eq!(plan.revision, ContextRevision(1));
         assert_eq!(controller.manifest().estimated_input_tokens, 71);
         assert!(controller.manifest().is_fresh(&components("current"), 1));
+    }
+
+    #[test]
+    fn action_request_requires_current_revision() {
+        let mut controller = ContextController::default();
+        controller.update_sources(components("first"), 1);
+        let current = controller.manifest().revision;
+
+        let error = controller
+            .request_action(ContextActionKind::Compact, ContextRevision::INITIAL)
+            .expect_err("stale revision must be rejected");
+
+        assert_eq!(
+            error,
+            ContextActionError::StaleRevision {
+                expected: ContextRevision::INITIAL,
+                current,
+            }
+        );
+        assert!(controller.pending_actions().is_empty());
+
+        let request = controller
+            .request_action(ContextActionKind::Compact, current)
+            .expect("current revision is accepted");
+        assert_eq!(request.base_revision, current);
+        assert_eq!(request.sequence, 1);
+    }
+
+    #[test]
+    fn repeated_action_request_is_idempotent_while_pending() {
+        let mut controller = ContextController::default();
+        let revision = controller.manifest().revision;
+
+        let first = controller
+            .request_action(ContextActionKind::ResetProvider, revision)
+            .expect("first request is accepted");
+        let second = controller
+            .request_action(ContextActionKind::ResetProvider, revision)
+            .expect("repeat is accepted idempotently");
+
+        assert_eq!(first, second);
+        assert_eq!(controller.pending_actions().len(), 1);
+    }
+
+    #[test]
+    fn refresh_keeps_pending_action_across_revision_change() {
+        let mut controller = ContextController::default();
+        let request = controller
+            .request_action(ContextActionKind::Refresh, ContextRevision::INITIAL)
+            .expect("request is accepted");
+
+        controller.prepare(&budget(50), components("current"), 1);
+
+        assert_eq!(controller.pending_actions(), &[request]);
+        assert!(controller.manifest().revision.0 > request.base_revision.0);
+    }
+
+    #[test]
+    fn take_pending_actions_clears_queue_and_keeps_outcome() {
+        let mut controller = ContextController::default();
+        let request = controller
+            .request_action(ContextActionKind::Export, ContextRevision::INITIAL)
+            .expect("request is accepted");
+
+        assert_eq!(controller.take_pending_actions(), vec![request]);
+        assert!(controller.pending_actions().is_empty());
+
+        controller.record_action_outcome(
+            request,
+            ContextActionOutcome::Completed {
+                detail: "exported".to_string(),
+            },
+        );
+        let record = controller.last_action().expect("outcome is retained");
+        assert_eq!(record.request, request);
+        assert_eq!(record.applied_revision, controller.manifest().revision);
     }
 }
