@@ -1,7 +1,7 @@
 use super::{Tool, ToolContext, ToolOutput, skill_state};
 use crate::context::ContextRevision;
 use crate::context_controller::{
-    ContextActionKind, ContextController, ContextPruneKind, ContextPruneSpec,
+    ContextActionKind, ContextController, ContextPruneForecast, ContextPruneKind, ContextPruneSpec,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -141,6 +141,104 @@ fn actions_metadata(controller: &ContextController) -> Value {
     })
 }
 
+/// Разбор параметров обрезки из аргументов инструмента.
+fn parse_prune_spec(input: &ContextPruneInput) -> Result<ContextPruneSpec> {
+    let kind = match input.kind.as_str() {
+        "images" => ContextPruneKind::Images,
+        "memory-injections" => ContextPruneKind::MemoryInjections,
+        "tool-results" => ContextPruneKind::ToolResults,
+        "turns" => ContextPruneKind::Turns,
+        other => anyhow::bail!("unsupported prune kind: {other}"),
+    };
+    let mut spec = ContextPruneSpec::new(kind);
+    if let Some(keep_recent) = input.keep_recent {
+        spec = spec.keep_recent(keep_recent);
+    }
+    Ok(spec)
+}
+
+/// Расчёт обрезки в виде, который читает модель.
+fn forecast_metadata(forecast: &ContextPruneForecast) -> Value {
+    let mut value = json!(forecast);
+    if let Some(object) = value.as_object_mut() {
+        object.insert("no_op".to_string(), json!(forecast.is_no_op()));
+    }
+    value
+}
+
+/// Что произойдёт со сжатием: `preview` показывает его триггер, а не
+/// прогноз размера, потому что результат измеряется после запуска.
+fn compaction_projection(controller: &ContextController) -> Value {
+    match controller.last_plan() {
+        Some(plan) => json!({
+            "needs_compaction": plan.needs_compaction(),
+            "estimated_input_tokens": plan.estimated_input_tokens,
+            "max_input_tokens": plan.max_input_tokens,
+            "projected_after_tokens": Value::Null,
+            "projected_after_reason": "compaction is measured after it runs",
+        }),
+        None => json!({
+            "needs_compaction": Value::Null,
+            "reason": "no provider preflight has run yet",
+        }),
+    }
+}
+
+/// Проекция обрезки: что уйдёт, что останется и сколько это освободит.
+///
+/// Числа берутся из снимка с границы turn-а, поэтому операция ничего не
+/// меняет, не пишет файлы и не ставит заявку в очередь.
+fn projection_metadata(
+    controller: &ContextController,
+    requested: Option<ContextPruneSpec>,
+) -> Value {
+    let Some(revision) = controller.prune_projection_revision() else {
+        return json!({
+            "status": "not_available",
+            "reason": "no turn-boundary snapshot yet; it is recorded before the next provider request",
+        });
+    };
+    let prune: Vec<Value> = controller
+        .prune_projections()
+        .iter()
+        .map(|projection| {
+            json!({
+                "kind": projection.kind,
+                "default_keep_recent": projection.kind.default_keep_recent(),
+                "total_items": projection.levels.iter().map(|level| level.items).sum::<usize>()
+                    + projection.overflow_items,
+                "forecast": forecast_metadata(
+                    &projection.forecast(projection.kind.default_keep_recent())
+                ),
+            })
+        })
+        .collect();
+    let requested = requested.map(|spec| match controller.prune_forecast(spec) {
+        Some(forecast) => json!({
+            "status": if forecast.is_no_op() { "no_op" } else { "available" },
+            "queues_nothing": true,
+            "forecast": forecast_metadata(&forecast),
+        }),
+        None => json!({
+            "status": "not_available",
+            "reason": "the snapshot does not cover this prune kind",
+        }),
+    });
+    json!({
+        "status": "available",
+        "snapshot_revision": revision.0,
+        "stale": controller.prune_projection_stale(),
+        "stale_note": "stale=true means the transcript changed after the snapshot",
+        "estimated_context_tokens": controller
+            .prune_projections()
+            .first()
+            .map(|projection| projection.total_tokens),
+        "compaction": compaction_projection(controller),
+        "prune": prune,
+        "requested": requested,
+    })
+}
+
 fn queued_action_metadata(
     action: &str,
     controller: &ContextController,
@@ -171,7 +269,7 @@ impl Tool for ContextControlTool {
     }
 
     fn description(&self) -> &str {
-        "Read-only context status, preflight metadata and queued context actions."
+        "Read-only context status, projections and queued context actions."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -183,7 +281,7 @@ impl Tool for ContextControlTool {
                 "action": {
                     "type": "string",
                     "enum": ["status", "preview", "refresh", "compact", "reset-provider", "export", "prune", "undo-prune"],
-                    "description": "Operation to perform; queued actions apply on the next turn.",
+                    "description": "Operation to perform; preview projects, queued actions apply next turn.",
                 },
                 "expected_revision": {
                     "type": "integer",
@@ -192,7 +290,7 @@ impl Tool for ContextControlTool {
                 },
                 "prune": {
                     "type": "object",
-                    "description": "Prune parameters for the prune action.",
+                    "description": "Prune parameters for prune and for a preview dry-run.",
                     "required": ["kind"],
                     "properties": {
                         "kind": {
@@ -221,12 +319,26 @@ impl Tool for ContextControlTool {
             .map_err(|_| anyhow::anyhow!("context controller lock poisoned"))?;
 
         let action = params.action.as_str();
+        // `preview` принимает spec обрезки как dry-run: заявка не ставится.
+        let requested_prune = match (&params.prune, action) {
+            (Some(input), "preview") => Some(parse_prune_spec(input)?),
+            _ => None,
+        };
         let metadata = match action {
-            "status" | "preview" => json!({
+            "status" => json!({
                 "action": action,
                 "mutated": false,
                 "context": context_metadata(&controller),
                 "preflight": preflight_metadata(&controller),
+                "actions": actions_metadata(&controller),
+            }),
+            "preview" => json!({
+                "action": action,
+                "mutated": false,
+                "queues_nothing": true,
+                "context": context_metadata(&controller),
+                "preflight": preflight_metadata(&controller),
+                "projection": projection_metadata(&controller, requested_prune),
                 "actions": actions_metadata(&controller),
             }),
             "refresh" | "compact" | "reset-provider" => {
@@ -260,22 +372,12 @@ impl Tool for ContextControlTool {
                     )
                 })?;
                 let request = if action == "prune" {
-                    let input = params.prune.ok_or_else(|| {
+                    let input = params.prune.as_ref().ok_or_else(|| {
                         anyhow::anyhow!(
                             "prune spec is required for `prune`; pass kind images|memory-injections|tool-results|turns"
                         )
                     })?;
-                    let kind = match input.kind.as_str() {
-                        "images" => ContextPruneKind::Images,
-                        "memory-injections" => ContextPruneKind::MemoryInjections,
-                        "tool-results" => ContextPruneKind::ToolResults,
-                        "turns" => ContextPruneKind::Turns,
-                        other => anyhow::bail!("unsupported prune kind: {other}"),
-                    };
-                    let mut spec = ContextPruneSpec::new(kind);
-                    if let Some(keep_recent) = input.keep_recent {
-                        spec = spec.keep_recent(keep_recent);
-                    }
+                    let spec = parse_prune_spec(input)?;
                     controller
                         .request_prune(spec, ContextRevision(expected))
                         .map_err(|error| anyhow::anyhow!("{error}"))?
@@ -297,6 +399,7 @@ impl Tool for ContextControlTool {
 mod tests {
     use super::*;
     use crate::context::{ContextBudget, ContextComponentHashes};
+    use crate::context_controller::{ContextPruneLevel, ContextPruneProjection};
     use crate::tool::{Registry, tests::MockProvider};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, RwLock};
@@ -331,6 +434,29 @@ mod tests {
             controller,
             tool_context(session_id),
         )
+    }
+
+    /// Кладёт снимок проекции так же, как это делает preflight агента.
+    fn record_projection(
+        controller: &Arc<Mutex<ContextController>>,
+        kind: ContextPruneKind,
+        levels: Vec<ContextPruneLevel>,
+        total_tokens: usize,
+    ) {
+        let mut controller = controller.lock().expect("controller lock");
+        let revision = controller.manifest().revision;
+        controller.record_prune_projections(
+            revision,
+            vec![ContextPruneProjection {
+                kind,
+                levels,
+                overflow_levels: 0,
+                overflow_items: 0,
+                overflow_tokens: 0,
+                total_tokens,
+                source_messages: 8,
+            }],
+        );
     }
 
     #[tokio::test]
@@ -427,6 +553,10 @@ mod tests {
         assert_eq!(metadata["mutated"], json!(false));
         assert_eq!(metadata["context"]["revision"], json!(0));
         assert_eq!(metadata["preflight"]["status"], json!("not_available"));
+        assert!(
+            metadata["projection"].is_null(),
+            "status must stay a summary; the projection belongs to preview"
+        );
 
         let controller = controller.lock().expect("controller lock");
         assert_eq!(controller.manifest(), &before_manifest);
@@ -470,6 +600,202 @@ mod tests {
                 .expect("controller lock")
                 .execution_state(),
             &before_state
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_projects_what_prune_would_drop() {
+        let (tool, controller, ctx) = bound_tool("context-preview-projection");
+        record_projection(
+            &controller,
+            ContextPruneKind::Images,
+            vec![
+                ContextPruneLevel {
+                    index: 5,
+                    tokens: 10,
+                    items: 1,
+                },
+                ContextPruneLevel {
+                    index: 2,
+                    tokens: 30,
+                    items: 1,
+                },
+            ],
+            500,
+        );
+        let (before_manifest, before_state) = {
+            let controller = controller.lock().expect("controller lock");
+            (
+                controller.manifest().clone(),
+                controller.execution_state().clone(),
+            )
+        };
+
+        let result = tool
+            .execute(
+                json!({"action": "preview", "prune": {"kind": "images", "keep_recent": 1}}),
+                ctx,
+            )
+            .await
+            .expect("preview should succeed");
+        let metadata = result.metadata.expect("preview metadata");
+
+        assert_eq!(metadata["mutated"], json!(false));
+        assert_eq!(metadata["queues_nothing"], json!(true));
+        assert_eq!(metadata["projection"]["status"], json!("available"));
+        assert_eq!(metadata["projection"]["snapshot_revision"], json!(0));
+        assert_eq!(metadata["projection"]["stale"], json!(false));
+        assert_eq!(
+            metadata["projection"]["estimated_context_tokens"],
+            json!(500)
+        );
+        assert_eq!(metadata["projection"]["prune"][0]["kind"], json!("images"));
+        assert_eq!(metadata["projection"]["prune"][0]["total_items"], json!(2));
+        assert_eq!(
+            metadata["projection"]["prune"][0]["forecast"]["removable_items"],
+            json!(1),
+            "the forecast must show what leaves by default"
+        );
+        assert_eq!(
+            metadata["projection"]["prune"][0]["forecast"]["removable_tokens"],
+            json!(30)
+        );
+        assert_eq!(
+            metadata["projection"]["requested"]["status"],
+            json!("available")
+        );
+        assert_eq!(
+            metadata["projection"]["requested"]["queues_nothing"],
+            json!(true)
+        );
+        assert_eq!(
+            metadata["projection"]["requested"]["forecast"]["removable_items"],
+            json!(1)
+        );
+        assert_eq!(
+            metadata["projection"]["requested"]["forecast"]["removable_tokens"],
+            json!(30)
+        );
+        assert_eq!(
+            metadata["projection"]["requested"]["forecast"]["remaining_tokens"],
+            json!(470)
+        );
+        assert_eq!(
+            metadata["projection"]["requested"]["forecast"]["tokens_exact"],
+            json!(true)
+        );
+
+        let controller = controller.lock().expect("controller lock");
+        assert!(
+            controller.pending_actions().is_empty(),
+            "preview must not queue any work"
+        );
+        assert_eq!(controller.manifest(), &before_manifest);
+        assert_eq!(controller.execution_state(), &before_state);
+    }
+
+    #[tokio::test]
+    async fn preview_explains_missing_and_stale_snapshots() {
+        let (tool, controller, _) = bound_tool("context-preview-snapshot");
+
+        let result = tool
+            .execute(
+                json!({"action": "preview"}),
+                tool_context("context-preview-snapshot"),
+            )
+            .await
+            .expect("preview without a snapshot should still answer");
+        let metadata = result.metadata.expect("preview metadata");
+        assert_eq!(metadata["projection"]["status"], json!("not_available"));
+        assert!(
+            metadata["projection"]["reason"]
+                .as_str()
+                .expect("reason")
+                .contains("snapshot"),
+            "the answer must say why the projection is missing: {metadata}"
+        );
+
+        record_projection(
+            &controller,
+            ContextPruneKind::Turns,
+            vec![ContextPruneLevel {
+                index: 1,
+                tokens: 40,
+                items: 2,
+            }],
+            300,
+        );
+        {
+            let mut controller = controller.lock().expect("controller lock");
+            controller.update_sources(ContextComponentHashes::default(), 7);
+        }
+
+        let result = tool
+            .execute(
+                json!({"action": "preview"}),
+                tool_context("context-preview-snapshot"),
+            )
+            .await
+            .expect("preview with a stale snapshot should still answer");
+        let metadata = result.metadata.expect("preview metadata");
+        assert_eq!(metadata["projection"]["status"], json!("available"));
+        assert_eq!(metadata["projection"]["stale"], json!(true));
+        assert_eq!(metadata["projection"]["snapshot_revision"], json!(0));
+        assert_eq!(metadata["context"]["revision"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn preview_dry_run_reports_no_op_for_kept_items() {
+        let (tool, controller, ctx) = bound_tool("context-preview-no-op");
+        record_projection(
+            &controller,
+            ContextPruneKind::Images,
+            vec![ContextPruneLevel {
+                index: 4,
+                tokens: 12,
+                items: 1,
+            }],
+            200,
+        );
+
+        let result = tool
+            .execute(
+                json!({"action": "preview", "prune": {"kind": "images", "keep_recent": 1}}),
+                ctx,
+            )
+            .await
+            .expect("preview should succeed");
+        let metadata = result.metadata.expect("preview metadata");
+
+        assert_eq!(
+            metadata["projection"]["requested"]["status"],
+            json!("no_op")
+        );
+        assert_eq!(
+            metadata["projection"]["requested"]["forecast"]["removable_items"],
+            json!(0)
+        );
+        assert_eq!(
+            metadata["projection"]["requested"]["forecast"]["no_op"],
+            json!(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_rejects_unknown_prune_kind() {
+        let (tool, _controller, ctx) = bound_tool("context-preview-kind");
+
+        let error = tool
+            .execute(
+                json!({"action": "preview", "prune": {"kind": "threads"}}),
+                ctx,
+            )
+            .await
+            .expect_err("unknown prune kind must be rejected");
+
+        assert!(
+            error.to_string().contains("unsupported prune kind"),
+            "got: {error}"
         );
     }
 

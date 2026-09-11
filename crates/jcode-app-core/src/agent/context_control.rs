@@ -5,6 +5,7 @@ use crate::context_controller::{
 };
 use crate::message::{ContentBlock, Message, ToolDefinition};
 use crate::prompt::SplitSystemPrompt;
+use crate::session::StoredMessage;
 use crate::skill_runtime::SkillRuntimeRegistry;
 use serde::Serialize;
 
@@ -27,69 +28,85 @@ fn serialized_token_estimate<T: Serialize + ?Sized>(value: &T) -> usize {
     }
 }
 
+/// Оценка токенов одного блока provider-запроса.
+///
+/// Один и тот же расчёт используют preflight, обрезка контекста и её
+/// предварительный просмотр, поэтому числа `preview` и применённой операции
+/// совпадают.
+pub(super) fn block_token_estimate(block: &ContentBlock) -> usize {
+    match block {
+        ContentBlock::Text { text, .. } | ContentBlock::Reasoning { text } => {
+            crate::util::estimate_tokens(text)
+        }
+        ContentBlock::ReasoningTrace { .. } => 0,
+        ContentBlock::AnthropicThinking {
+            thinking,
+            signature,
+        } => crate::util::estimate_tokens(thinking)
+            .saturating_add(crate::util::estimate_tokens(signature)),
+        ContentBlock::OpenAIReasoning {
+            id,
+            summary,
+            status,
+            ..
+        } => crate::util::estimate_tokens(id)
+            .saturating_add(
+                summary
+                    .iter()
+                    .map(|text| crate::util::estimate_tokens(text))
+                    .fold(0usize, |total, tokens| total.saturating_add(tokens)),
+            )
+            .saturating_add(
+                status
+                    .as_deref()
+                    .map(crate::util::estimate_tokens)
+                    .unwrap_or_default(),
+            ),
+        ContentBlock::ToolUse {
+            id,
+            name,
+            input,
+            thought_signature,
+        } => crate::util::estimate_tokens(id)
+            .saturating_add(crate::util::estimate_tokens(name))
+            .saturating_add(serialized_token_estimate(input))
+            .saturating_add(
+                thought_signature
+                    .as_deref()
+                    .map(crate::util::estimate_tokens)
+                    .unwrap_or_default(),
+            ),
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            ..
+        } => crate::util::estimate_tokens(tool_use_id)
+            .saturating_add(crate::util::estimate_tokens(content)),
+        ContentBlock::Image { media_type, .. } => {
+            IMAGE_TOKEN_ESTIMATE.saturating_add(crate::util::estimate_tokens(media_type))
+        }
+        ContentBlock::OpenAICompaction { .. } => OPAQUE_NATIVE_ITEM_TOKEN_ESTIMATE,
+    }
+}
+
+/// Оценка токенов сообщения с учётом накладных расходов на сообщение.
 pub(super) fn message_token_estimate(messages: &[Message]) -> usize {
     messages
         .iter()
-        .map(|message| {
-            let block_tokens = message
-                .content
-                .iter()
-                .map(|block| match block {
-                    ContentBlock::Text { text, .. } | ContentBlock::Reasoning { text } => {
-                        crate::util::estimate_tokens(text)
-                    }
-                    ContentBlock::ReasoningTrace { .. } => 0,
-                    ContentBlock::AnthropicThinking {
-                        thinking,
-                        signature,
-                    } => crate::util::estimate_tokens(thinking)
-                        .saturating_add(crate::util::estimate_tokens(signature)),
-                    ContentBlock::OpenAIReasoning {
-                        id,
-                        summary,
-                        status,
-                        ..
-                    } => crate::util::estimate_tokens(id)
-                        .saturating_add(
-                            summary
-                                .iter()
-                                .map(|text| crate::util::estimate_tokens(text))
-                                .fold(0usize, |total, tokens| total.saturating_add(tokens)),
-                        )
-                        .saturating_add(
-                            status
-                                .as_deref()
-                                .map(crate::util::estimate_tokens)
-                                .unwrap_or_default(),
-                        ),
-                    ContentBlock::ToolUse {
-                        id,
-                        name,
-                        input,
-                        thought_signature,
-                    } => crate::util::estimate_tokens(id)
-                        .saturating_add(crate::util::estimate_tokens(name))
-                        .saturating_add(serialized_token_estimate(input))
-                        .saturating_add(
-                            thought_signature
-                                .as_deref()
-                                .map(crate::util::estimate_tokens)
-                                .unwrap_or_default(),
-                        ),
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        ..
-                    } => crate::util::estimate_tokens(tool_use_id)
-                        .saturating_add(crate::util::estimate_tokens(content)),
-                    ContentBlock::Image { media_type, .. } => IMAGE_TOKEN_ESTIMATE
-                        .saturating_add(crate::util::estimate_tokens(media_type)),
-                    ContentBlock::OpenAICompaction { .. } => OPAQUE_NATIVE_ITEM_TOKEN_ESTIMATE,
-                })
-                .fold(0usize, |total, tokens| total.saturating_add(tokens));
-            block_tokens.saturating_add(4)
-        })
+        .map(|message| content_token_estimate(&message.content))
         .fold(0usize, |total, tokens| total.saturating_add(tokens))
+}
+
+/// Оценка токенов сохранённого сообщения теми же правилами.
+pub(super) fn stored_message_token_estimate(message: &StoredMessage) -> usize {
+    content_token_estimate(&message.content)
+}
+
+fn content_token_estimate(content: &[ContentBlock]) -> usize {
+    content
+        .iter()
+        .map(block_token_estimate)
+        .fold(4usize, |total, tokens| total.saturating_add(tokens))
 }
 
 impl Agent {
@@ -175,10 +192,11 @@ impl Agent {
             ..ContextComponentHashes::default()
         };
         self.refresh_components_binding(&components);
+        let message_tokens = message_token_estimate(messages);
         let estimated_input_tokens = split_prompt
             .estimated_tokens()
             .saturating_add(ToolDefinition::aggregate_prompt_token_estimate(tools))
-            .saturating_add(message_token_estimate(messages));
+            .saturating_add(message_tokens);
         let provider_context_limit = self.provider.context_window();
         let reserved_output_tokens = RESERVED_OUTPUT_TOKENS.min(provider_context_limit / 4);
         let safety_margin_tokens = SAFETY_MARGIN_TOKENS.min(
@@ -203,6 +221,10 @@ impl Agent {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .prepare(&budget, components, provider_generation);
+
+        // Снимок проекции обрезки нужен, чтобы `preview` отвечал по текущему
+        // транскрипту, не читая его через контроллер.
+        self.record_prune_projections(plan.revision, message_tokens);
 
         crate::logging::info(&format!(
             "Context preflight: action={:?} revision={} estimated={} max={} provider_limit={}",

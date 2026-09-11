@@ -133,6 +133,213 @@ fn pending_memory(computed_at: std::time::Instant) -> crate::memory::PendingMemo
     }
 }
 
+/// Разбирает оценку размера из результата обрезки: `... estimated tokens A -> B`.
+fn estimated_tokens(detail: &str) -> (usize, usize) {
+    let tail = detail
+        .split("estimated tokens ")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no token estimate in outcome: {detail}"));
+    let (before, after) = tail
+        .split_once(" -> ")
+        .unwrap_or_else(|| panic!("no token arrow in outcome: {detail}"));
+    (
+        before.trim().parse().expect("before tokens"),
+        after.trim().parse().expect("after tokens"),
+    )
+}
+
+fn completed_detail(agent: &Agent) -> String {
+    match last_outcome(agent) {
+        ContextActionOutcome::Completed { detail } => detail,
+        other => panic!("expected Completed outcome, got {other:?}"),
+    }
+}
+
+/// Расчёт обрезки из снимка, который снимает preflight на границе turn-а.
+fn prune_forecast(
+    agent: &Agent,
+    kind: ContextPruneKind,
+    keep_recent: Option<usize>,
+) -> crate::context_controller::ContextPruneForecast {
+    let mut spec = ContextPruneSpec::new(kind);
+    if let Some(keep_recent) = keep_recent {
+        spec = spec.keep_recent(keep_recent);
+    }
+    agent
+        .context_controller
+        .lock()
+        .expect("controller lock")
+        .prune_forecast(spec)
+        .expect("the snapshot must cover this prune kind")
+}
+
+/// Снимает проекцию так же, как preflight перед запросом.
+fn record_preview_snapshot(agent: &mut Agent) {
+    let messages = agent.session.messages_for_provider_uncached();
+    let prompt = agent.build_system_prompt_split(None);
+    agent.prepare_context_preflight(&messages, &[], &prompt);
+}
+
+#[tokio::test]
+async fn preview_forecast_matches_applied_image_prune() {
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = test_agent().await;
+    for index in 0..3 {
+        agent.add_message(
+            Role::User,
+            vec![
+                ContentBlock::Text {
+                    text: format!("turn {index}"),
+                    cache_control: None,
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "aGVsbG8=".to_string(),
+                },
+            ],
+        );
+    }
+    record_preview_snapshot(&mut agent);
+
+    let forecast = prune_forecast(&agent, ContextPruneKind::Images, Some(1));
+    assert_eq!(forecast.removable_items, 2);
+    assert!(forecast.tokens_exact);
+    assert!(!forecast.is_no_op());
+
+    request_prune(&agent, ContextPruneKind::Images, Some(1));
+    agent.apply_pending_context_actions();
+
+    let detail = completed_detail(&agent);
+    let (before, after) = estimated_tokens(&detail);
+    assert!(
+        detail.contains(&format!("pruned {} item(s)", forecast.removable_items)),
+        "applied prune must match the forecast, got: {detail}"
+    );
+    assert_eq!(
+        before - after,
+        forecast.removable_tokens,
+        "preview must predict the tokens the prune frees: {detail}"
+    );
+
+    assert_eq!(
+        count_images(&agent),
+        1,
+        "the next request must carry only the newest kept image"
+    );
+    assert!(
+        agent
+            .session
+            .messages_for_provider()
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter(|block| matches!(block, ContentBlock::Image { .. }))
+            .count()
+            == 1,
+        "the pruned images must also leave the cached provider view"
+    );
+    assert!(
+        prune_forecast(&agent, ContextPruneKind::Images, Some(1)).is_no_op(),
+        "the snapshot must follow the pruned transcript"
+    );
+
+    request_action(&agent, ContextActionKind::UndoPrune);
+    agent.apply_pending_context_actions();
+
+    let restored = prune_forecast(&agent, ContextPruneKind::Images, Some(1));
+    assert_eq!(restored.removable_items, forecast.removable_items);
+    assert_eq!(restored.removable_tokens, forecast.removable_tokens);
+}
+
+#[tokio::test]
+async fn preview_forecast_matches_applied_turn_prune() {
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = test_agent().await;
+    for index in 0..6 {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("user {index}"),
+                cache_control: None,
+            }],
+        );
+        agent.add_message(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: format!("assistant {index}"),
+                cache_control: None,
+            }],
+        );
+    }
+    record_preview_snapshot(&mut agent);
+
+    let forecast = prune_forecast(&agent, ContextPruneKind::Turns, Some(4));
+    assert!(!forecast.is_no_op());
+    assert!(
+        !forecast.sample_removed.is_empty(),
+        "the forecast must name the messages that leave"
+    );
+
+    request_prune(&agent, ContextPruneKind::Turns, Some(4));
+    agent.apply_pending_context_actions();
+
+    let detail = completed_detail(&agent);
+    let (before, after) = estimated_tokens(&detail);
+    assert!(
+        detail.contains(&format!("pruned {} item(s)", forecast.removable_items)),
+        "applied prune must match the forecast ({} item(s), {} tokens); got: {detail}",
+        forecast.removable_items,
+        forecast.removable_tokens
+    );
+    assert_eq!(
+        before - after,
+        forecast.removable_tokens,
+        "preview must predict the tokens the prune frees: {detail}"
+    );
+}
+
+#[tokio::test]
+async fn preview_forecast_matches_applied_memory_injection_prune() {
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = test_agent().await;
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "real turn".to_string(),
+            cache_control: None,
+        }],
+    );
+    for index in 0..3 {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!(
+                    "<system-reminder>\n# Memory\n{index}. remembered fact {index}\n</system-reminder>"
+                ),
+                cache_control: None,
+            }],
+        );
+    }
+    record_preview_snapshot(&mut agent);
+
+    let forecast = prune_forecast(&agent, ContextPruneKind::MemoryInjections, Some(1));
+    assert_eq!(forecast.removable_items, 2);
+
+    request_prune(&agent, ContextPruneKind::MemoryInjections, Some(1));
+    agent.apply_pending_context_actions();
+
+    let detail = completed_detail(&agent);
+    let (before, after) = estimated_tokens(&detail);
+    assert!(
+        detail.contains(&format!("pruned {} item(s)", forecast.removable_items)),
+        "applied prune must match the forecast, got: {detail}"
+    );
+    assert_eq!(
+        before - after,
+        forecast.removable_tokens,
+        "preview must predict the tokens the prune frees: {detail}"
+    );
+}
+
 #[tokio::test]
 async fn memory_computed_before_a_transcript_mutation_is_rejected() {
     let mut agent = test_agent().await;
