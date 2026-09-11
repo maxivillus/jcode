@@ -353,7 +353,7 @@ impl Agent {
                 detail: "export is read-only; call context_control export for the manifest"
                     .to_string(),
             },
-            ContextActionKind::Prune => match request.prune {
+            ContextActionKind::Prune => match request.prune.clone() {
                 Some(spec) => self.prune_for_model_request(spec),
                 None => ContextActionOutcome::Rejected {
                     reason: "prune request is missing its spec".to_string(),
