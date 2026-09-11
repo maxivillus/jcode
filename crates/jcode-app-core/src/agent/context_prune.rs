@@ -6,6 +6,7 @@ use crate::context_controller::{
 };
 use crate::message::{ContentBlock, Message, Role};
 use crate::session::StoredMessage;
+use crate::tool_pairing::{balanced_prefix_ends, balanced_suffix_start, first_gap};
 
 /// Начало сообщения memory-инъекции, как его собирает `memory_injection_message`.
 const MEMORY_INJECTION_MARKER: &str = "<system-reminder>\n# Memory\n";
@@ -24,17 +25,6 @@ const PRUNE_KINDS: [ContextPruneKind; 5] = [
     ContextPruneKind::Turns,
     ContextPruneKind::Tail,
 ];
-
-/// Сообщение содержит вызов инструмента, ответ на который идёт позже.
-///
-/// Срез хвоста сразу после такого сообщения оставил бы незакрытый вызов,
-/// поэтому точка среза по нему не предлагается.
-fn has_tool_use(message: &StoredMessage) -> bool {
-    message
-        .content
-        .iter()
-        .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
-}
 
 fn is_memory_injection(message: &StoredMessage) -> bool {
     message.role == Role::User
@@ -150,12 +140,30 @@ fn prune_levels(messages: &[StoredMessage], kind: ContextPruneKind) -> Vec<Conte
     }
 }
 
+/// Границы среза turn-групп: начала групп, сдвинутые назад до целой пары.
+///
+/// Начало группы берётся по сообщению пользователя, а ответы инструментов тоже
+/// имеют роль пользователя. Поэтому граница сдвигается назад, пока сохранённый
+/// суффикс не станет самодостаточным: иначе ответ остался бы без своего вызова.
+///
+/// Список идёт от старых групп к новым. Его используют и проекция, и
+/// применение, поэтому `preview` и обрезка совпадают.
+fn turn_cut_candidates(messages: &[StoredMessage]) -> Vec<usize> {
+    let mut candidates: Vec<usize> = turn_group_starts(messages)
+        .into_iter()
+        .map(|start| balanced_suffix_start(messages, start))
+        .collect();
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates
+}
+
 /// Уровни обрезки turn-групп: один уровень на группу.
 ///
 /// Границы берутся из того же источника, что и при применении обрезки, иначе
 /// `preview` показал бы не то, что удалит обрезка.
 fn turn_prune_levels(messages: &[StoredMessage]) -> Vec<ContextPruneLevel> {
-    let mut boundaries = turn_group_starts(messages);
+    let mut boundaries = turn_cut_candidates(messages);
     if boundaries.len() <= ContextPruneKind::Turns.min_keep_recent() {
         // Единственную группу обрезка не забирает: transcript не остаётся пустым.
         return Vec::new();
@@ -184,15 +192,16 @@ fn turn_prune_levels(messages: &[StoredMessage]) -> Vec<ContextPruneLevel> {
 /// Уровень самодостаточен: `message_id` называет последнее сохраняемое
 /// сообщение, `items` и `tokens` описывают весь удаляемый хвост. Снимок хранит
 /// только самые новые точки среза, поэтому окно ограничено
-/// [`MAX_PROJECTION_LEVELS`]. Срезы после сообщений с вызовом инструмента не
-/// предлагаются.
+/// [`MAX_PROJECTION_LEVELS`]. Срезы, после которых в префиксе остался бы вызов
+/// без ответа, не предлагаются.
 fn tail_prune_levels(messages: &[StoredMessage]) -> Vec<ContextPruneLevel> {
+    let balanced = balanced_prefix_ends(messages);
     let mut levels = Vec::new();
     let mut tail_items = 0usize;
     let mut tail_tokens = 0usize;
     for (index, message) in messages.iter().enumerate().rev() {
         // Срез в конце транскрипта ничего не удаляет и не является точкой среза.
-        if tail_items > 0 && !has_tool_use(message) {
+        if tail_items > 0 && balanced.get(index) == Some(&true) {
             levels.push(ContextPruneLevel {
                 index,
                 tokens: tail_tokens,
@@ -294,6 +303,20 @@ impl Agent {
         if pruned == 0 {
             return ContextActionOutcome::Skipped {
                 reason: prune_skip_reason(&spec),
+            };
+        }
+
+        // Пары «вызов — ответ» должны остаться целыми: ответ без вызова
+        // провайдер отвергает, вызов без ответа он достраивает синтетическим
+        // ответом. Проверка общая для всех видов обрезки, с откатом.
+        if let Some(gap) = first_gap(&self.session.messages) {
+            self.session.replace_messages(snapshot.messages);
+            crate::logging::warn(&format!(
+                "Context prune ({:?}) was rolled back: {gap}",
+                spec.kind
+            ));
+            return ContextActionOutcome::Failed {
+                reason: format!("{gap}; the transcript was left unchanged"),
             };
         }
 
@@ -466,11 +489,16 @@ impl Agent {
 
     /// Удаляет историю до границы сохранения turn-групп.
     fn drop_turn_prefix(&mut self, keep_recent: usize) -> usize {
-        let starts = turn_group_starts(&self.session.messages);
-        if starts.len() <= keep_recent {
+        // Те же границы, что и у проекции: `preview` и обрезка не расходятся.
+        let candidates = turn_cut_candidates(&self.session.messages);
+        if candidates.len() <= keep_recent {
             return 0;
         }
-        let start_index = starts[starts.len() - keep_recent];
+        let start_index = candidates[candidates.len() - keep_recent];
+        if start_index == 0 {
+            // Сдвиг дошёл до начала транскрипта: резать нечего.
+            return 0;
+        }
         // Удаляется префикс до границы, поэтому число удалённых сообщений
         // равно самой границе.
         let removed = start_index;

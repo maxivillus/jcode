@@ -542,6 +542,200 @@ async fn prune_images_replaces_stale_images_and_undo_restores() {
     assert_eq!(count_images(&agent), 3);
 }
 
+/// Ответы инструментов, у которых в транскрипте нет своего вызова.
+///
+/// Провайдер отвергает такие блоки, поэтому после любой обрезки их быть не
+/// должно.
+fn orphan_tool_results(agent: &Agent) -> Vec<String> {
+    let mut calls: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut orphans = Vec::new();
+    for message in &agent.session.messages {
+        for block in &message.content {
+            match block {
+                ContentBlock::ToolUse { id, .. } => {
+                    calls.insert(id.clone());
+                }
+                ContentBlock::ToolResult { tool_use_id, .. } => {
+                    if !calls.contains(tool_use_id) {
+                        orphans.push(tool_use_id.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    orphans
+}
+
+#[tokio::test]
+async fn turns_prune_never_leaves_a_tool_result_without_its_call() {
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = test_agent().await;
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "turn 0".to_string(),
+            cache_control: None,
+        }],
+    );
+    agent.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "call-1".to_string(),
+            name: "read".to_string(),
+            input: serde_json::json!({"file_path": "Cargo.toml"}),
+            thought_signature: None,
+        }],
+    );
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "call-1".to_string(),
+            content: "payload".to_string(),
+            is_error: None,
+        }],
+    );
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "turn 1".to_string(),
+            cache_control: None,
+        }],
+    );
+
+    request_prune(&agent, ContextPruneKind::Turns, Some(2));
+    agent.apply_pending_context_actions();
+
+    assert!(
+        orphan_tool_results(&agent).is_empty(),
+        "a kept tool result must keep its call; kept messages: {:?}",
+        agent
+            .session
+            .messages
+            .iter()
+            .map(|message| message.id.clone())
+            .collect::<Vec<String>>()
+    );
+}
+
+#[tokio::test]
+async fn turns_forecast_matches_the_applied_prune_across_a_tool_pair() {
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = test_agent().await;
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "turn 0".to_string(),
+            cache_control: None,
+        }],
+    );
+    agent.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "call-1".to_string(),
+            name: "read".to_string(),
+            input: serde_json::json!({"file_path": "Cargo.toml"}),
+            thought_signature: None,
+        }],
+    );
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "call-1".to_string(),
+            content: "payload".to_string(),
+            is_error: None,
+        }],
+    );
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "turn 1".to_string(),
+            cache_control: None,
+        }],
+    );
+    record_preview_snapshot(&mut agent);
+
+    let forecast = prune_forecast(&agent, ContextPruneKind::Turns, Some(1));
+    assert!(!forecast.is_no_op());
+
+    request_prune(&agent, ContextPruneKind::Turns, Some(1));
+    agent.apply_pending_context_actions();
+
+    let detail = completed_detail(&agent);
+    let (before, after) = estimated_tokens(&detail);
+    assert!(
+        detail.contains(&format!("pruned {} item(s)", forecast.removable_items)),
+        "applied prune must match the forecast, got: {detail}"
+    );
+    assert_eq!(
+        before - after,
+        forecast.removable_tokens,
+        "preview must predict the tokens the prune frees: {detail}"
+    );
+    assert!(orphan_tool_results(&agent).is_empty());
+}
+
+#[tokio::test]
+async fn tail_prune_refuses_a_cut_between_a_call_and_its_result() {
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = test_agent().await;
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "turn 0".to_string(),
+            cache_control: None,
+        }],
+    );
+    agent.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "call-1".to_string(),
+            name: "read".to_string(),
+            input: serde_json::json!({"file_path": "Cargo.toml"}),
+            thought_signature: None,
+        }],
+    );
+    // Сообщение пользователя приходит до ответа инструмента.
+    let between = agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "заметка".to_string(),
+            cache_control: None,
+        }],
+    );
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "call-1".to_string(),
+            content: "payload".to_string(),
+            is_error: None,
+        }],
+    );
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "turn 1".to_string(),
+            cache_control: None,
+        }],
+    );
+    record_preview_snapshot(&mut agent);
+
+    assert!(
+        tail_forecast(&agent, &between).is_none(),
+        "срез между вызовом и ответом не предлагается: префикс оставил бы вызов без ответа"
+    );
+
+    request_tail_prune(&agent, &between);
+    agent.apply_pending_context_actions();
+
+    assert!(
+        matches!(last_outcome(&agent), ContextActionOutcome::Skipped { .. }),
+        "срез между вызовом и ответом не должен применяться: {:?}",
+        last_outcome(&agent)
+    );
+    assert!(orphan_tool_results(&agent).is_empty());
+}
+
 #[tokio::test]
 async fn prune_tool_results_keeps_tool_pairing() {
     let _guard = crate::storage::lock_test_env();
