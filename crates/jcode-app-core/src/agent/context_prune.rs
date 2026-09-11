@@ -17,12 +17,24 @@ const PRUNED_TOOL_RESULT_NOTE: &str = "[tool result pruned to save context]";
 const PRUNED_TOOL_RESULT_PREFIX: &str = "[tool result pruned";
 
 /// Виды обрезки в порядке, в котором их показывает снимок проекции.
-const PRUNE_KINDS: [ContextPruneKind; 4] = [
+const PRUNE_KINDS: [ContextPruneKind; 5] = [
     ContextPruneKind::Images,
     ContextPruneKind::MemoryInjections,
     ContextPruneKind::ToolResults,
     ContextPruneKind::Turns,
+    ContextPruneKind::Tail,
 ];
+
+/// Сообщение содержит вызов инструмента, ответ на который идёт позже.
+///
+/// Срез хвоста сразу после такого сообщения оставил бы незакрытый вызов,
+/// поэтому точка среза по нему не предлагается.
+fn has_tool_use(message: &StoredMessage) -> bool {
+    message
+        .content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+}
 
 fn is_memory_injection(message: &StoredMessage) -> bool {
     message.role == Role::User
@@ -118,6 +130,7 @@ fn prune_levels(messages: &[StoredMessage], kind: ContextPruneKind) -> Vec<Conte
                         .and_then(|message| message.content.get(position.block))
                         .map_or(0, block_savings_tokens),
                     items: 1,
+                    message_id: None,
                 })
                 .collect()
         }
@@ -129,9 +142,11 @@ fn prune_levels(messages: &[StoredMessage], kind: ContextPruneKind) -> Vec<Conte
                     .get(index)
                     .map_or(0, super::context_control::stored_message_token_estimate),
                 items: 1,
+                message_id: None,
             })
             .collect(),
         ContextPruneKind::Turns => turn_prune_levels(messages),
+        ContextPruneKind::Tail => tail_prune_levels(messages),
     }
 }
 
@@ -158,9 +173,59 @@ fn turn_prune_levels(messages: &[StoredMessage]) -> Vec<ContextPruneLevel> {
                     .map(super::context_control::stored_message_token_estimate)
                     .fold(0usize, usize::saturating_add),
                 items: slice.len(),
+                message_id: None,
             }
         })
         .collect()
+}
+
+/// Точки среза хвоста: один уровень на сообщение, после которого можно резать.
+///
+/// Уровень самодостаточен: `message_id` называет последнее сохраняемое
+/// сообщение, `items` и `tokens` описывают весь удаляемый хвост. Снимок хранит
+/// только самые новые точки среза, поэтому окно ограничено
+/// [`MAX_PROJECTION_LEVELS`]. Срезы после сообщений с вызовом инструмента не
+/// предлагаются.
+fn tail_prune_levels(messages: &[StoredMessage]) -> Vec<ContextPruneLevel> {
+    let mut levels = Vec::new();
+    let mut tail_items = 0usize;
+    let mut tail_tokens = 0usize;
+    for (index, message) in messages.iter().enumerate().rev() {
+        // Срез в конце транскрипта ничего не удаляет и не является точкой среза.
+        if tail_items > 0 && !has_tool_use(message) {
+            levels.push(ContextPruneLevel {
+                index,
+                tokens: tail_tokens,
+                items: tail_items,
+                message_id: Some(message.id.clone()),
+            });
+            if levels.len() >= MAX_PROJECTION_LEVELS {
+                break;
+            }
+        }
+        tail_items = tail_items.saturating_add(1);
+        tail_tokens = tail_tokens.saturating_add(
+            super::context_control::stored_message_token_estimate(message),
+        );
+    }
+    levels
+}
+
+/// Почему обрезка ничего не удалила.
+fn prune_skip_reason(spec: &ContextPruneSpec) -> String {
+    match spec.kind {
+        ContextPruneKind::Tail => match spec.after_message_id.as_deref() {
+            Some(id) => format!(
+                "nothing to prune after message {id}: it must be one of the newest cut points preview offers and must leave no unanswered tool call"
+            ),
+            None => "tail requires after: pass the id of the last message to keep".to_string(),
+        },
+        kind => format!(
+            "nothing to prune for {kind:?} with keep_recent={}",
+            spec.keep_recent
+                .unwrap_or_else(|| kind.default_keep_recent())
+        ),
+    }
 }
 
 /// Снимок проекции одного вида обрезки для контроллера.
@@ -217,9 +282,6 @@ impl Agent {
         &mut self,
         spec: ContextPruneSpec,
     ) -> ContextActionOutcome {
-        let keep_recent = spec
-            .keep_recent
-            .unwrap_or_else(|| spec.kind.default_keep_recent());
         let before_tokens = self.provider_token_estimate();
         let snapshot = ContextPruneUndoSnapshot {
             messages: self.session.messages.clone(),
@@ -227,14 +289,11 @@ impl Agent {
             session_provider_session_id: self.session.provider_session_id.clone(),
         };
 
-        let pruned = self.apply_prune(spec.kind, keep_recent);
+        let pruned = self.apply_prune(&spec);
 
         if pruned == 0 {
             return ContextActionOutcome::Skipped {
-                reason: format!(
-                    "nothing to prune for {:?} with keep_recent={keep_recent}",
-                    spec.kind
-                ),
+                reason: prune_skip_reason(&spec),
             };
         }
 
@@ -280,10 +339,14 @@ impl Agent {
         }
     }
 
-    /// Применяет обрезку вида и возвращает число удалённых элементов.
-    fn apply_prune(&mut self, kind: ContextPruneKind, keep_recent: usize) -> usize {
+    /// Применяет обрезку по параметрам и возвращает число удалённых элементов.
+    fn apply_prune(&mut self, spec: &ContextPruneSpec) -> usize {
+        let kind = spec.kind;
         // Та же нижняя граница, что и у `forecast`: transcript не остаётся пустым.
-        let keep_recent = keep_recent.max(kind.min_keep_recent());
+        let keep_recent = spec
+            .keep_recent
+            .unwrap_or_else(|| kind.default_keep_recent())
+            .max(kind.min_keep_recent());
         match kind {
             ContextPruneKind::Images | ContextPruneKind::ToolResults => {
                 let positions = prunable_block_positions(&self.session.messages, kind);
@@ -294,7 +357,32 @@ impl Agent {
                 self.drop_messages(&targets, keep_recent)
             }
             ContextPruneKind::Turns => self.drop_turn_prefix(keep_recent),
+            ContextPruneKind::Tail => self.drop_tail_after(spec.after_message_id.as_deref()),
         }
+    }
+
+    /// Удаляет хвост после указанного сообщения, сохраняя его самого.
+    ///
+    /// Точка среза берётся из того же набора, что и снимок проекции: так
+    /// `preview` и применение не расходятся. В набор не попадают сообщения с
+    /// незакрытым вызовом инструмента и сообщения старше окна снимка.
+    fn drop_tail_after(&mut self, after_message_id: Option<&str>) -> usize {
+        let Some(after_message_id) = after_message_id else {
+            return 0;
+        };
+        let cut = tail_prune_levels(&self.session.messages)
+            .iter()
+            .find(|level| level.message_id.as_deref() == Some(after_message_id))
+            .map(|level| level.index);
+        let Some(index) = cut else {
+            return 0;
+        };
+        let removed = self.session.messages.len() - index - 1;
+        if removed == 0 {
+            return 0;
+        }
+        self.session.truncate_messages(index + 1);
+        removed
     }
 
     /// Заменяет заметкой все цели, кроме последних `keep_recent`.

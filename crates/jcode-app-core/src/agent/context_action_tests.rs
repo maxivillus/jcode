@@ -1,7 +1,8 @@
 use super::Agent;
 use crate::context::{ContextBudget, ContextComponentHashes, ContextRevision};
 use crate::context_controller::{
-    ContextActionKind, ContextActionOutcome, ContextPruneKind, ContextPruneSpec,
+    ContextActionKind, ContextActionOutcome, ContextPruneForecast, ContextPruneKind,
+    ContextPruneSpec,
 };
 use crate::message::{ContentBlock, Message, Role, ToolDefinition};
 use crate::provider::{EventStream, Provider};
@@ -103,6 +104,34 @@ fn count_images(agent: &Agent) -> usize {
         .flat_map(|message| message.content.iter())
         .filter(|block| matches!(block, ContentBlock::Image { .. }))
         .count()
+}
+
+/// Заявка на срез хвоста после указанного сообщения.
+fn request_tail_prune(agent: &Agent, after: &str) {
+    let revision = agent
+        .context_controller
+        .lock()
+        .expect("controller lock")
+        .manifest()
+        .revision;
+    agent
+        .context_controller
+        .lock()
+        .expect("controller lock")
+        .request_prune(
+            ContextPruneSpec::new(ContextPruneKind::Tail).after(after),
+            revision,
+        )
+        .expect("tail prune request should be accepted");
+}
+
+/// Расчёт среза хвоста из снимка, который снимает preflight на границе turn-а.
+fn tail_forecast(agent: &Agent, after: &str) -> Option<ContextPruneForecast> {
+    agent
+        .context_controller
+        .lock()
+        .expect("controller lock")
+        .prune_forecast(ContextPruneSpec::new(ContextPruneKind::Tail).after(after))
 }
 
 /// Поднимает revision контекста так же, как preflight перед запросом:
@@ -767,4 +796,123 @@ async fn skills_change_invalidates_resumable_provider_session() {
 
     assert!(agent.provider_session_id.is_none());
     assert!(agent.session.provider_session_id.is_none());
+}
+#[tokio::test]
+async fn preview_forecast_matches_applied_tail_prune() {
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = test_agent().await;
+    let mut ids = Vec::new();
+    for index in 0..4 {
+        ids.push(agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("turn {index}"),
+                cache_control: None,
+            }],
+        ));
+    }
+    record_preview_snapshot(&mut agent);
+    let stored_before = agent.session.messages.len();
+
+    let forecast = tail_forecast(&agent, &ids[1]).expect("the snapshot knows this cut");
+    assert_eq!(forecast.removable_items, 2);
+    assert!(forecast.tokens_exact);
+    assert!(!forecast.is_no_op());
+    assert_eq!(
+        forecast.sample_removed.len(),
+        2,
+        "the forecast must show the removed tail"
+    );
+
+    request_tail_prune(&agent, &ids[1]);
+    agent.apply_pending_context_actions();
+
+    let detail = completed_detail(&agent);
+    let (before, after) = estimated_tokens(&detail);
+    assert!(
+        detail.contains(&format!("pruned {} item(s)", forecast.removable_items)),
+        "applied prune must match the forecast, got: {detail}"
+    );
+    assert_eq!(
+        before - after,
+        forecast.removable_tokens,
+        "preview must predict the tokens the tail prune frees: {detail}"
+    );
+    assert_eq!(
+        agent.session.messages.len(),
+        stored_before - 2,
+        "only the kept prefix must remain"
+    );
+    assert_eq!(
+        agent.session.messages.last().expect("kept prefix").id,
+        ids[1],
+        "the cut keeps the message named by after"
+    );
+
+    request_action(&agent, ContextActionKind::UndoPrune);
+    agent.apply_pending_context_actions();
+
+    assert_eq!(
+        agent.session.messages.len(),
+        stored_before,
+        "undo must restore the removed tail"
+    );
+    assert_eq!(
+        agent.session.messages.last().expect("restored tail").id,
+        ids[3],
+        "undo must bring back every removed message"
+    );
+}
+
+#[tokio::test]
+async fn tail_prune_skips_a_cut_that_leaves_an_unanswered_tool_call() {
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = test_agent().await;
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "start".to_string(),
+            cache_control: None,
+        }],
+    );
+    let call = agent.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "call-1".to_string(),
+            name: "read".to_string(),
+            input: serde_json::json!({"file_path": "Cargo.toml"}),
+            thought_signature: None,
+        }],
+    );
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "call-1".to_string(),
+            content: "payload".to_string(),
+            is_error: None,
+        }],
+    );
+    record_preview_snapshot(&mut agent);
+    let stored_before = agent.session.messages.len();
+
+    assert!(
+        tail_forecast(&agent, &call).is_none(),
+        "a cut right after a tool call must not be offered"
+    );
+
+    request_tail_prune(&agent, &call);
+    agent.apply_pending_context_actions();
+
+    match last_outcome(&agent) {
+        ContextActionOutcome::Skipped { reason } => assert!(
+            reason.contains("unanswered tool call"),
+            "the skip reason must explain the unsafe cut: {reason}"
+        ),
+        other => panic!("expected Skipped for an unsafe cut, got {other:?}"),
+    }
+    assert_eq!(
+        agent.session.messages.len(),
+        stored_before,
+        "the transcript must stay intact"
+    );
 }
