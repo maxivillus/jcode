@@ -4,11 +4,12 @@ use crate::context_controller::{
     ContextActionKind, ContextController, ContextPruneForecast, ContextPruneKind,
     ContextPruneProjection, ContextPruneSpec,
 };
-use anyhow::Result;
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock, Weak};
 
 pub(crate) type ContextControllerHandle = Arc<StdMutex<ContextController>>;
@@ -17,6 +18,9 @@ pub(crate) type ContextControllerBindings = Arc<StdRwLock<HashMap<String, Contex
 
 /// Сколько точек среза хвоста `preview` показывает в списке видов.
 const TAIL_CUT_SAMPLES: usize = 8;
+
+/// Максимальная длина имени файла экспорта.
+const EXPORT_NAME_MAX_CHARS: usize = 128;
 
 #[derive(Clone)]
 pub(crate) struct ContextTools {
@@ -87,6 +91,9 @@ struct ContextControlInput {
     /// Параметры структурной обрезки для действия `prune`.
     #[serde(default)]
     prune: Option<ContextPruneInput>,
+    /// Параметры записи redacted-манифеста для действия `export`.
+    #[serde(default)]
+    export: Option<ContextExportInput>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +104,19 @@ struct ContextPruneInput {
     /// Последнее сохраняемое сообщение для вида `tail`.
     #[serde(default)]
     after: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContextExportInput {
+    /// Имя файла внутри каталога экспорта. Каталогов в имени быть не может.
+    #[serde(default)]
+    path: Option<String>,
+    /// `json` или `markdown`; без него формат берётся из расширения.
+    #[serde(default)]
+    format: Option<String>,
+    /// Заменить уже существующий файл. Без этого флага запись отклоняется.
+    #[serde(default)]
+    overwrite: bool,
 }
 
 fn default_action() -> String {
@@ -146,6 +166,246 @@ fn actions_metadata(controller: &ContextController) -> Value {
         "pending": controller.pending_actions(),
         "last": controller.last_action(),
     })
+}
+
+/// Формат файла экспорта.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportFormat {
+    Json,
+    Markdown,
+}
+
+impl ExportFormat {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Markdown => "markdown",
+        }
+    }
+}
+
+/// Каталог, в который `export` пишет файлы: `<jcode home>/exports`, режим 0700.
+fn export_dir() -> Result<PathBuf> {
+    let dir = jcode_base::storage::jcode_dir()
+        .map_err(|error| anyhow::anyhow!("cannot resolve the jcode home directory: {error}"))?
+        .join("exports");
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| anyhow::anyhow!("cannot create the exports directory: {error}"))?;
+    jcode_core::fs::set_directory_permissions_owner_only(&dir)
+        .map_err(|error| anyhow::anyhow!("cannot restrict the exports directory: {error}"))?;
+    Ok(dir)
+}
+
+/// Проверяет имя файла и собирает путь внутри каталога экспорта.
+fn export_file_path(dir: &Path, name: &str) -> Result<PathBuf> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("export.path must not be empty");
+    }
+    if name.chars().count() > EXPORT_NAME_MAX_CHARS {
+        bail!("export.path is too long (max {EXPORT_NAME_MAX_CHARS} characters)");
+    }
+    if name.starts_with('.') {
+        bail!("export.path must not start with a dot");
+    }
+    if name.contains('/') || name.contains('\\') {
+        bail!("export.path must be a file name inside the exports directory, not a path");
+    }
+    let path = dir.join(name);
+    if path.parent() != Some(dir) {
+        bail!("export.path must stay inside the exports directory");
+    }
+    Ok(path)
+}
+
+/// Формат из параметра или из расширения имени файла.
+fn export_format(name: &str, requested: Option<&str>) -> Result<ExportFormat> {
+    match requested.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) if value == "json" => Ok(ExportFormat::Json),
+        Some(value) if value == "markdown" || value == "md" => Ok(ExportFormat::Markdown),
+        Some(other) => bail!("unsupported export format: {other}; use json or markdown"),
+        None => {
+            let lower = name.to_ascii_lowercase();
+            if lower.ends_with(".json") {
+                Ok(ExportFormat::Json)
+            } else if lower.ends_with(".md") || lower.ends_with(".markdown") {
+                Ok(ExportFormat::Markdown)
+            } else {
+                bail!("export.path needs a .json or .md extension, or pass export.format");
+            }
+        }
+    }
+}
+
+/// Redacted-манифест для записи: только метрики, хеши и счётчики.
+///
+/// Документ собирается из полей манифеста, поэтому в него не попадают текст
+/// сообщений, результаты инструментов, секреты и env.
+fn export_document(controller: &ContextController, session_id: &str) -> Value {
+    json!({
+        "export_version": 1,
+        "redacted": true,
+        "note": "redacted manifest: metrics, hashes and counters only",
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "session_id": session_id,
+        "context": context_metadata(controller),
+        "preflight": preflight_metadata(controller),
+        "execution_state": execution_state_metadata(controller),
+        "actions": actions_metadata(controller),
+        "prune": controller
+            .prune_projections()
+            .iter()
+            .map(|projection| json!({
+                "kind": projection.kind,
+                "levels": projection.levels.len() + projection.overflow_levels,
+                "items": projection.levels.iter().map(|level| level.items).sum::<usize>()
+                    + projection.overflow_items,
+                "tokens": projection.total_tokens,
+                "source_messages": projection.source_messages,
+            }))
+            .collect::<Vec<Value>>(),
+    })
+}
+
+/// Значение для строки markdown: строки без кавычек, остальное как в JSON.
+fn inline_json(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Рендер документа в markdown.
+///
+/// Глубина ограничена: глубже значения выводятся одной строкой, чтобы файл не
+/// разрастался на вложенных структурах.
+fn render_markdown(value: &Value, out: &mut String, level: usize) {
+    match value {
+        Value::Object(map) => {
+            for (key, item) in map {
+                if (item.is_object() || item.is_array()) && level < 3 {
+                    out.push_str(&format!("\n{} {key}\n\n", "#".repeat(level + 2)));
+                    render_markdown(item, out, level + 1);
+                } else {
+                    out.push_str(&format!("- {key}: {}\n", inline_json(item)));
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                if item.is_object() || item.is_array() {
+                    render_markdown(item, out, level + 1);
+                } else {
+                    out.push_str(&format!("- {}\n", inline_json(item)));
+                }
+            }
+        }
+        other => out.push_str(&format!("{}\n", inline_json(other))),
+    }
+}
+
+fn export_markdown(document: &Value) -> String {
+    let mut out = String::from("# Context export\n");
+    render_markdown(document, &mut out, 1);
+    out
+}
+
+/// Атомарная запись с правами 0600: сначала временный файл, затем rename.
+///
+/// Перезапись разрешена только явным `export.overwrite`, поэтому существование
+/// файла проверяется до записи.
+fn write_export_file(path: &Path, contents: &str, overwrite: bool) -> Result<()> {
+    if path.exists() && !overwrite {
+        bail!(
+            "export file {} already exists; pass export.overwrite=true to replace it",
+            path.display()
+        );
+    }
+    let Some(dir) = path.parent() else {
+        bail!("export path has no parent directory");
+    };
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("context-export");
+    let temporary = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    std::fs::write(&temporary, contents)
+        .map_err(|error| anyhow::anyhow!("cannot write {}: {error}", temporary.display()))?;
+    let result = jcode_core::fs::set_permissions_owner_only(&temporary)
+        .map_err(|error| anyhow::anyhow!("cannot restrict {}: {error}", temporary.display()))
+        .and_then(|()| {
+            std::fs::rename(&temporary, path)
+                .map_err(|error| anyhow::anyhow!("cannot publish {}: {error}", path.display()))
+        });
+    if result.is_err()
+        && let Err(cleanup) = std::fs::remove_file(&temporary)
+    {
+        crate::logging::warn(&format!(
+            "cannot remove temporary export {}: {cleanup}",
+            temporary.display()
+        ));
+    }
+    result
+}
+
+/// Ответ `export` без файла: только redacted-манифест.
+fn export_manifest_only_metadata(controller: &ContextController) -> Value {
+    json!({
+        "action": "export",
+        "mutated": false,
+        "writes_file": false,
+        "redacted": true,
+        "note": "the manifest is returned here; pass export.path to write it to a file",
+        "manifest": context_metadata(controller),
+        "execution_state": execution_state_metadata(controller),
+        "actions": actions_metadata(controller),
+    })
+}
+
+/// Действие `export`: redacted-манифест в ответе и, по запросу, в файле.
+fn export_action_metadata(
+    controller: &ContextController,
+    ctx: &ToolContext,
+    input: Option<&ContextExportInput>,
+) -> Result<Value> {
+    let Some(input) = input else {
+        return Ok(export_manifest_only_metadata(controller));
+    };
+    let Some(name) = input.path.as_deref() else {
+        return Ok(export_manifest_only_metadata(controller));
+    };
+    let dir = export_dir()?;
+    let path = export_file_path(&dir, name)?;
+    let format = export_format(name, input.format.as_deref())?;
+    let document = export_document(controller, &ctx.session_id);
+    let contents = match format {
+        ExportFormat::Json => format!(
+            "{}\n",
+            serde_json::to_string_pretty(&document)
+                .map_err(|error| anyhow::anyhow!("cannot serialize the export: {error}"))?
+        ),
+        ExportFormat::Markdown => export_markdown(&document),
+    };
+    let existed = path.exists();
+    write_export_file(&path, &contents, input.overwrite)?;
+    Ok(json!({
+        "action": "export",
+        "mutated": false,
+        "writes_file": true,
+        "redacted": true,
+        "file": {
+            "path": path.display().to_string(),
+            "format": format.as_str(),
+            "bytes": contents.len(),
+            "overwritten": existed,
+            "permissions": "0600",
+            "external_storage": true,
+            "note": "external storage: the file is never loaded back into context automatically",
+        },
+        "manifest": context_metadata(controller),
+        "execution_state": execution_state_metadata(controller),
+        "actions": actions_metadata(controller),
+    }))
 }
 
 /// Разбор параметров обрезки из аргументов инструмента.
@@ -351,6 +611,26 @@ impl Tool for ContextControlTool {
                     },
                     "additionalProperties": false,
                 },
+                "export": {
+                    "type": "object",
+                    "description": "Export parameters; without them the redacted manifest is only returned in the response.",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "File name inside the exports directory, e.g. context.json or context.md. Directories are not allowed.",
+                        },
+                        "format": {
+                            "type": "string",
+                            "enum": ["json", "markdown"],
+                            "description": "File format; defaults to the file extension.",
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "Replace an existing file; without it an existing file is refused.",
+                        },
+                    },
+                    "additionalProperties": false,
+                },
             },
             "additionalProperties": false,
         })
@@ -402,14 +682,7 @@ impl Tool for ContextControlTool {
                     .map_err(|error| anyhow::anyhow!("{error}"))?;
                 queued_action_metadata(action, &controller, request)
             }
-            "export" => json!({
-                "action": action,
-                "mutated": false,
-                "writes_file": false,
-                "manifest": context_metadata(&controller),
-                "execution_state": execution_state_metadata(&controller),
-                "actions": actions_metadata(&controller),
-            }),
+            "export" => export_action_metadata(&controller, &ctx, params.export.as_ref())?,
             "prune" | "undo-prune" => {
                 let expected = params.expected_revision.ok_or_else(|| {
                     anyhow::anyhow!(
