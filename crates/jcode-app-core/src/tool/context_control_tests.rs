@@ -621,6 +621,180 @@ async fn queued_action_is_idempotent_and_not_mutating() {
     assert_eq!(controller.execution_state(), &before_state);
 }
 
+/// Отводит `JCODE_HOME` в отдельный каталог и возвращает его при выходе.
+struct JcodeHomeGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl JcodeHomeGuard {
+    fn set(path: &std::path::Path) -> Self {
+        let previous = std::env::var_os("JCODE_HOME");
+        jcode_base::env::set_var("JCODE_HOME", path);
+        Self { previous }
+    }
+}
+
+impl Drop for JcodeHomeGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => jcode_base::env::set_var("JCODE_HOME", value),
+            None => jcode_base::env::remove_var("JCODE_HOME"),
+        }
+    }
+}
+
+/// Имена файлов в каталоге экспорта: по ним видно незакрытые временные файлы.
+fn export_dir_entries(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .expect("read exports directory")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn export_writes_a_private_redacted_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let _home = JcodeHomeGuard::set(temp.path());
+    let (tool, _controller, ctx) = bound_tool("context-export-file");
+
+    let result = tool
+        .execute(
+            json!({"action": "export", "export": {"path": "context.json"}}),
+            ctx,
+        )
+        .await
+        .expect("export writes the manifest");
+    let metadata = result.metadata.expect("export metadata");
+
+    assert_eq!(metadata["writes_file"], json!(true));
+    assert_eq!(metadata["redacted"], json!(true));
+    assert_eq!(metadata["file"]["format"], json!("json"));
+    assert_eq!(metadata["file"]["overwritten"], json!(false));
+    assert_eq!(metadata["file"]["permissions"], json!("0600"));
+    assert_eq!(metadata["file"]["external_storage"], json!(true));
+
+    let dir = temp.path().join("exports");
+    let path = metadata["file"]["path"].as_str().expect("export path");
+    assert_eq!(
+        std::path::Path::new(path).parent(),
+        Some(dir.as_path()),
+        "the file must stay inside the exports directory"
+    );
+
+    let contents = std::fs::read_to_string(path).expect("read export");
+    let document: Value = serde_json::from_str(&contents).expect("export is json");
+    assert_eq!(document["session_id"], json!("context-export-file"));
+    assert_eq!(document["redacted"], json!(true));
+    assert!(
+        document["context"]["components"].is_object(),
+        "the manifest keeps component hashes: {document}"
+    );
+    assert!(document["prune"].is_array());
+
+    let mode = std::fs::metadata(path)
+        .expect("stat export")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "the export must be owner-only");
+    assert_eq!(
+        export_dir_entries(&dir),
+        vec!["context.json".to_string()],
+        "the atomic write must leave no temporary file behind"
+    );
+}
+
+#[tokio::test]
+async fn export_refuses_to_replace_a_file_without_confirmation() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let _home = JcodeHomeGuard::set(temp.path());
+    let (tool, _controller, ctx) = bound_tool("context-export-overwrite");
+
+    tool.execute(
+        json!({"action": "export", "export": {"path": "context.md"}}),
+        ctx.clone(),
+    )
+    .await
+    .expect("first export writes the file");
+
+    let error = tool
+        .execute(
+            json!({"action": "export", "export": {"path": "context.md"}}),
+            ctx.clone(),
+        )
+        .await
+        .expect_err("an existing export must not be replaced silently");
+    assert!(
+        error.to_string().contains("export.overwrite=true"),
+        "the error must name the confirmation: {error}"
+    );
+
+    let result = tool
+        .execute(
+            json!({"action": "export", "export": {"path": "context.md", "overwrite": true}}),
+            ctx,
+        )
+        .await
+        .expect("explicit overwrite is accepted");
+    let metadata = result.metadata.expect("export metadata");
+
+    assert_eq!(metadata["file"]["format"], json!("markdown"));
+    assert_eq!(metadata["file"]["overwritten"], json!(true));
+    let contents = std::fs::read_to_string(metadata["file"]["path"].as_str().expect("path"))
+        .expect("read markdown export");
+    assert!(
+        contents.starts_with("# Context export"),
+        "markdown export must start with its title: {contents}"
+    );
+    assert!(contents.contains("- revision:"), "got: {contents}");
+}
+
+#[tokio::test]
+async fn export_rejects_paths_outside_the_exports_directory() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let _home = JcodeHomeGuard::set(temp.path());
+    let (tool, _controller, ctx) = bound_tool("context-export-path");
+
+    for path in [
+        "../escape.json",
+        "sub/dir.json",
+        ".hidden.json",
+        "/tmp/escape.json",
+    ] {
+        let error = tool
+            .execute(
+                json!({"action": "export", "export": {"path": path}}),
+                ctx.clone(),
+            )
+            .await
+            .expect_err("a path outside the exports directory must be refused");
+        assert!(
+            error.to_string().contains("export.path"),
+            "{path} must be named in the error: {error}"
+        );
+    }
+
+    let error = tool
+        .execute(
+            json!({"action": "export", "export": {"path": "notes.txt"}}),
+            ctx,
+        )
+        .await
+        .expect_err("an unknown extension must be refused");
+    assert!(error.to_string().contains(".json or .md"), "got: {error}");
+    assert!(
+        !temp.path().join("exports").join("notes.txt").exists(),
+        "a refused export must not leave a file"
+    );
+}
+
 #[tokio::test]
 async fn export_returns_redacted_manifest_without_file() {
     let (tool, controller, ctx) = bound_tool("context-export");
