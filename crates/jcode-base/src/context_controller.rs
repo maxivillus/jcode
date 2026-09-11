@@ -90,6 +90,154 @@ impl ContextPruneSpec {
     }
 }
 
+impl ContextPruneKind {
+    /// Сколько последних элементов этот вид обрезки щадит по умолчанию.
+    pub fn default_keep_recent(self) -> usize {
+        match self {
+            Self::Images => 1,
+            Self::MemoryInjections => 1,
+            Self::ToolResults => 2,
+            Self::Turns => 6,
+        }
+    }
+
+    /// Наименьший допустимый `keep_recent` для вида обрезки.
+    ///
+    /// Turn-группы требуют хотя бы одной сохраняемой группы: иначе провайдерский
+    /// transcript остался бы пустым.
+    pub fn min_keep_recent(self) -> usize {
+        match self {
+            Self::Turns => 1,
+            Self::Images | Self::MemoryInjections | Self::ToolResults => 0,
+        }
+    }
+}
+
+/// Сколько элементов проекция хранит поимённо. Более старые элементы
+/// складываются в агрегированный остаток.
+pub const MAX_PROJECTION_LEVELS: usize = 256;
+
+/// Сколько удаляемых позиций прогноз показывает для наблюдаемости.
+const MAX_FORECAST_SAMPLE: usize = 8;
+
+/// Один удаляемый уровень проекции: с какой позиции начинается удаление,
+/// сколько элементов контекста оно забирает и сколько токенов освободит.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextPruneLevel {
+    pub index: usize,
+    pub tokens: usize,
+    /// Элементов контекста в уровне: для изображений, результатов и
+    /// memory-инъекций это 1, для turn-группы — число её сообщений.
+    pub items: usize,
+}
+
+/// Проекция одного вида обрезки, снятая владельцем транскрипта.
+///
+/// Controller не владеет сообщениями и хранит только позиции и оценки
+/// токенов. Поэтому `preview` отвечает по снимку с границы turn-а, не читая
+/// транскрипт и не становясь вторым владельцем истории.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextPruneProjection {
+    pub kind: ContextPruneKind,
+    /// Уровни удаления от самых новых элементов к самым старым.
+    pub levels: Vec<ContextPruneLevel>,
+    /// Сколько старых элементов не попало в `levels`.
+    pub overflow_levels: usize,
+    /// Сколько элементов контекста в этих старых уровнях.
+    pub overflow_items: usize,
+    /// Суммарные токены этих старых элементов.
+    pub overflow_tokens: usize,
+    /// Оценка токенов всего контекста на момент снимка.
+    pub total_tokens: usize,
+    /// Сколько сообщений было в транскрипте на момент снимка.
+    pub source_messages: usize,
+}
+
+impl ContextPruneProjection {
+    /// Предварительный расчёт: что уйдёт при `keep_recent` и сколько освободит.
+    ///
+    /// Элементы упорядочены от новых к старым, поэтому обрезка сохраняет
+    /// `keep_recent` первых уровней и удаляет все остальные.
+    pub fn forecast(&self, keep_recent: usize) -> ContextPruneForecast {
+        // Расчёт повторяет применение обрезки, поэтому нижняя граница та же.
+        let keep_recent = keep_recent.max(self.kind.min_keep_recent());
+        let stored = self.levels.len();
+        let total_items = self
+            .levels
+            .iter()
+            .map(|level| level.items)
+            .fold(self.overflow_items, usize::saturating_add);
+        let total_levels = stored.saturating_add(self.overflow_levels);
+        let removable_levels = total_levels.saturating_sub(keep_recent);
+        let (removable_items, removable_tokens, tokens_exact) = if keep_recent < stored {
+            let removed = &self.levels[keep_recent..];
+            (
+                removed
+                    .iter()
+                    .map(|level| level.items)
+                    .fold(self.overflow_items, usize::saturating_add),
+                removed
+                    .iter()
+                    .map(|level| level.tokens)
+                    .fold(self.overflow_tokens, usize::saturating_add),
+                true,
+            )
+        } else if removable_levels == 0 {
+            (0, 0, true)
+        } else if removable_levels == self.overflow_levels {
+            (self.overflow_items, self.overflow_tokens, true)
+        } else {
+            let share = self.overflow_levels.max(1);
+            (
+                self.overflow_items.saturating_mul(removable_levels) / share,
+                self.overflow_tokens.saturating_mul(removable_levels) / share,
+                false,
+            )
+        };
+        let sample_removed = self
+            .levels
+            .iter()
+            .skip(keep_recent)
+            .rev()
+            .take(MAX_FORECAST_SAMPLE)
+            .map(|level| level.index)
+            .collect();
+        ContextPruneForecast {
+            kind: self.kind,
+            keep_recent,
+            removable_items,
+            removable_tokens,
+            kept_items: total_items.saturating_sub(removable_items),
+            remaining_tokens: self.total_tokens.saturating_sub(removable_tokens),
+            tokens_exact,
+            sample_removed,
+        }
+    }
+}
+
+/// Итог предварительного расчёта одного вида обрезки.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextPruneForecast {
+    pub kind: ContextPruneKind,
+    pub keep_recent: usize,
+    pub removable_items: usize,
+    pub removable_tokens: usize,
+    pub kept_items: usize,
+    pub remaining_tokens: usize,
+    /// false, если токены посчитаны по среднему: снимок хранит только самые
+    /// новые элементы, а `keep_recent` больше их числа.
+    pub tokens_exact: bool,
+    /// До восьми самых старых удаляемых позиций.
+    pub sample_removed: Vec<usize>,
+}
+
+impl ContextPruneForecast {
+    /// Обрезка по этому расчёту ничего не изменит.
+    pub fn is_no_op(&self) -> bool {
+        self.removable_items == 0
+    }
+}
+
 /// Проверенный запрос действия с revision, на которой он основан.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextActionRequest {
@@ -150,6 +298,8 @@ pub struct ContextController {
     pending_actions: Vec<ContextActionRequest>,
     last_action: Option<ContextActionRecord>,
     next_action_sequence: u64,
+    prune_projections: Vec<ContextPruneProjection>,
+    prune_projection_revision: Option<ContextRevision>,
 }
 
 impl ContextController {
@@ -162,6 +312,8 @@ impl ContextController {
             pending_actions: Vec::new(),
             last_action: None,
             next_action_sequence: 0,
+            prune_projections: Vec::new(),
+            prune_projection_revision: None,
         }
     }
 
@@ -179,6 +331,8 @@ impl ContextController {
             pending_actions: Vec::new(),
             last_action: None,
             next_action_sequence: 0,
+            prune_projections: Vec::new(),
+            prune_projection_revision: None,
         })
     }
 
@@ -279,6 +433,53 @@ impl ContextController {
     /// Последний применённый запрос действия, если он был.
     pub fn last_action(&self) -> Option<&ContextActionRecord> {
         self.last_action.as_ref()
+    }
+
+    /// Запоминает проекцию обрезки, снятую владельцем транскрипта.
+    ///
+    /// Снимок нужен, чтобы `preview` отвечал без чтения транскрипта. Revision
+    /// фиксирует, к какому состоянию контекста снимок относится.
+    pub fn record_prune_projections(
+        &mut self,
+        revision: ContextRevision,
+        projections: Vec<ContextPruneProjection>,
+    ) {
+        self.prune_projections = projections;
+        self.prune_projection_revision = Some(revision);
+    }
+
+    /// Проекции обрезки из последнего снимка.
+    pub fn prune_projections(&self) -> &[ContextPruneProjection] {
+        &self.prune_projections
+    }
+
+    /// Revision, на которой был снят последний снимок проекции.
+    pub fn prune_projection_revision(&self) -> Option<ContextRevision> {
+        self.prune_projection_revision
+    }
+
+    /// Снимок проекции относится к более старой revision и требует обновления.
+    pub fn prune_projection_stale(&self) -> bool {
+        self.prune_projection_revision
+            .is_some_and(|revision| revision != self.manifest.revision)
+    }
+
+    /// Проекция одного вида обрезки, если снимок её содержит.
+    pub fn prune_projection(&self, kind: ContextPruneKind) -> Option<&ContextPruneProjection> {
+        self.prune_projections
+            .iter()
+            .find(|projection| projection.kind == kind)
+    }
+
+    /// Предварительный расчёт обрезки без изменения контекста.
+    ///
+    /// Возвращает `None`, если снимок проекции ещё не снят.
+    pub fn prune_forecast(&self, spec: ContextPruneSpec) -> Option<ContextPruneForecast> {
+        let projection = self.prune_projection(spec.kind)?;
+        let keep_recent = spec
+            .keep_recent
+            .unwrap_or_else(|| spec.kind.default_keep_recent());
+        Some(projection.forecast(keep_recent))
     }
 
     /// Проверяет patch без изменения state controller.
@@ -620,5 +821,222 @@ mod tests {
         let record = controller.last_action().expect("outcome is retained");
         assert_eq!(record.request, request);
         assert_eq!(record.applied_revision, controller.manifest().revision);
+    }
+
+    fn level(index: usize, tokens: usize) -> ContextPruneLevel {
+        ContextPruneLevel {
+            index,
+            tokens,
+            items: 1,
+        }
+    }
+
+    /// Уровень turn-группы: одно удаление забирает несколько сообщений.
+    fn group(index: usize, tokens: usize, items: usize) -> ContextPruneLevel {
+        ContextPruneLevel {
+            index,
+            tokens,
+            items,
+        }
+    }
+
+    fn projection(
+        kind: ContextPruneKind,
+        levels: Vec<ContextPruneLevel>,
+        overflow_levels: usize,
+        overflow_items: usize,
+        overflow_tokens: usize,
+        total_tokens: usize,
+    ) -> ContextPruneProjection {
+        ContextPruneProjection {
+            kind,
+            levels,
+            overflow_levels,
+            overflow_items,
+            overflow_tokens,
+            total_tokens,
+            source_messages: 7,
+        }
+    }
+
+    #[test]
+    fn prune_defaults_are_shared_with_the_apply_path() {
+        assert_eq!(ContextPruneKind::Images.default_keep_recent(), 1);
+        assert_eq!(ContextPruneKind::MemoryInjections.default_keep_recent(), 1);
+        assert_eq!(ContextPruneKind::ToolResults.default_keep_recent(), 2);
+        assert_eq!(ContextPruneKind::Turns.default_keep_recent(), 6);
+    }
+
+    #[test]
+    fn prune_keep_recent_floors_keep_the_transcript_usable() {
+        assert_eq!(ContextPruneKind::Turns.min_keep_recent(), 1);
+        assert_eq!(ContextPruneKind::Images.min_keep_recent(), 0);
+        assert_eq!(ContextPruneKind::MemoryInjections.min_keep_recent(), 0);
+        assert_eq!(ContextPruneKind::ToolResults.min_keep_recent(), 0);
+    }
+
+    #[test]
+    fn forecast_keeps_newest_levels_and_reports_savings() {
+        let projection = projection(
+            ContextPruneKind::Images,
+            vec![level(5, 10), level(6, 20), level(7, 30)],
+            0,
+            0,
+            0,
+            100,
+        );
+
+        let forecast = projection.forecast(1);
+
+        assert_eq!(forecast.removable_items, 2);
+        assert_eq!(forecast.removable_tokens, 50);
+        assert_eq!(forecast.kept_items, 1);
+        assert_eq!(forecast.remaining_tokens, 50);
+        assert!(forecast.tokens_exact);
+        assert!(!forecast.is_no_op());
+        assert_eq!(forecast.sample_removed, vec![7, 6]);
+    }
+
+    #[test]
+    fn forecast_removes_the_aggregated_remainder_while_it_keeps_fewer_levels() {
+        let projection = projection(
+            ContextPruneKind::ToolResults,
+            vec![level(1, 10), level(2, 10)],
+            5,
+            5,
+            50,
+            200,
+        );
+
+        let forecast = projection.forecast(1);
+
+        assert_eq!(forecast.removable_items, 6);
+        assert_eq!(forecast.removable_tokens, 60);
+        assert!(forecast.tokens_exact);
+    }
+
+    #[test]
+    fn forecast_reports_aggregated_estimate_beyond_the_snapshot() {
+        let projection = projection(ContextPruneKind::ToolResults, Vec::new(), 10, 24, 100, 500);
+
+        let partial = projection.forecast(4);
+        assert_eq!(
+            partial.removable_items, 14,
+            "6 of 10 aggregated levels keep a proportional share of 24 items"
+        );
+        assert_eq!(partial.removable_tokens, 60);
+        assert!(!partial.tokens_exact, "estimate is averaged, not itemized");
+
+        let all = projection.forecast(0);
+        assert_eq!(all.removable_items, 24);
+        assert_eq!(all.removable_tokens, 100);
+        assert!(all.tokens_exact);
+
+        let none = projection.forecast(10);
+        assert!(none.is_no_op());
+        assert_eq!(none.removable_tokens, 0);
+        assert!(none.tokens_exact);
+        assert!(none.sample_removed.is_empty());
+    }
+
+    #[test]
+    fn forecast_counts_items_inside_a_turn_level() {
+        let projection = projection(
+            ContextPruneKind::Turns,
+            vec![group(12, 100, 4), group(0, 50, 2)],
+            0,
+            0,
+            0,
+            900,
+        );
+
+        let forecast = projection.forecast(1);
+
+        assert_eq!(
+            forecast.removable_items, 2,
+            "two messages leave the history"
+        );
+        assert_eq!(forecast.removable_tokens, 50);
+        assert_eq!(forecast.kept_items, 4);
+        assert_eq!(forecast.remaining_tokens, 850);
+        assert_eq!(forecast.sample_removed, vec![0]);
+    }
+
+    #[test]
+    fn turns_forecast_keeps_at_least_the_newest_group() {
+        let projection = projection(
+            ContextPruneKind::Turns,
+            vec![group(12, 100, 4), group(0, 50, 2)],
+            0,
+            0,
+            0,
+            900,
+        );
+
+        let clamped = projection.forecast(0);
+        let single = projection.forecast(1);
+
+        assert_eq!(
+            clamped.keep_recent,
+            ContextPruneKind::Turns.min_keep_recent()
+        );
+        assert_eq!(clamped.removable_items, single.removable_items);
+        assert_eq!(clamped.removable_tokens, single.removable_tokens);
+        assert!(
+            projection.forecast(2).is_no_op(),
+            "keeping every group removes nothing"
+        );
+    }
+
+    #[test]
+    fn recorded_projection_is_forecastable_and_marked_stale_after_a_revision_change() {
+        let mut controller = ContextController::default();
+        let revision = controller.manifest().revision;
+        controller.record_prune_projections(
+            revision,
+            vec![projection(
+                ContextPruneKind::Images,
+                vec![level(1, 10)],
+                0,
+                0,
+                0,
+                40,
+            )],
+        );
+
+        assert!(!controller.prune_projection_stale());
+        let forecast = controller
+            .prune_forecast(ContextPruneSpec::new(ContextPruneKind::Images))
+            .expect("snapshot covers images");
+        assert_eq!(forecast.keep_recent, 1);
+        assert!(forecast.is_no_op());
+        assert!(
+            controller
+                .prune_forecast(ContextPruneSpec::new(ContextPruneKind::Turns))
+                .is_none(),
+            "kinds without a snapshot stay unknown"
+        );
+
+        controller.update_sources(components("changed"), 1);
+
+        assert!(controller.prune_projection_stale());
+        assert_eq!(
+            controller.prune_projection_revision(),
+            Some(ContextRevision::INITIAL)
+        );
+    }
+
+    #[test]
+    fn prune_forecast_without_a_snapshot_is_unknown() {
+        let controller = ContextController::default();
+
+        assert!(controller.prune_projections().is_empty());
+        assert!(controller.prune_projection_revision().is_none());
+        assert!(!controller.prune_projection_stale());
+        assert!(
+            controller
+                .prune_forecast(ContextPruneSpec::new(ContextPruneKind::Images).keep_recent(0))
+                .is_none()
+        );
     }
 }

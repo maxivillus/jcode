@@ -220,6 +220,7 @@ impl Agent {
                 self.provider_session_id = None;
                 self.session.provider_session_id = None;
                 self.note_transcript_mutation();
+                self.refresh_prune_projections();
                 logging::info(&format!(
                     "Model-requested compaction dropped {dropped} messages (usage was {usage_pct:.1}%)"
                 ));
