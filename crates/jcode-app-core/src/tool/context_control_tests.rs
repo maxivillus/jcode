@@ -230,12 +230,14 @@ async fn preview_projects_what_prune_would_drop() {
                 tokens: 10,
                 items: 1,
                 message_id: None,
+                checkpoint: None,
             },
             ContextPruneLevel {
                 index: 2,
                 tokens: 30,
                 items: 1,
                 message_id: None,
+                checkpoint: None,
             },
         ],
         500,
@@ -340,6 +342,7 @@ async fn preview_explains_missing_and_stale_snapshots() {
             tokens: 40,
             items: 2,
             message_id: None,
+            checkpoint: None,
         }],
         300,
     );
@@ -373,6 +376,7 @@ async fn preview_dry_run_reports_no_op_for_kept_items() {
             tokens: 12,
             items: 1,
             message_id: None,
+            checkpoint: None,
         }],
         200,
     );
@@ -462,12 +466,14 @@ async fn preview_lists_tail_cut_candidates_and_projects_the_requested_cut() {
                 tokens: 40,
                 items: 2,
                 message_id: Some("message-3".to_string()),
+                checkpoint: Some("compaction-boundary".to_string()),
             },
             ContextPruneLevel {
                 index: 2,
                 tokens: 60,
                 items: 3,
                 message_id: Some("message-2".to_string()),
+                checkpoint: None,
             },
         ],
         300,
@@ -490,6 +496,11 @@ async fn preview_lists_tail_cut_candidates_and_projects_the_requested_cut() {
         tail["sample_after"],
         json!(["message-3", "message-2"]),
         "the model must see which message ids it can cut after"
+    );
+    assert_eq!(
+        tail["checkpoints"],
+        json!([{"label": "compaction-boundary", "after": "message-3"}]),
+        "named cuts must stay visible even when they are older than the newest candidates"
     );
 
     let requested = &metadata["projection"]["requested"];

@@ -18,6 +18,8 @@ pub(crate) type ContextControllerBindings = Arc<StdRwLock<HashMap<String, Contex
 
 /// Сколько точек среза хвоста `preview` показывает в списке видов.
 const TAIL_CUT_SAMPLES: usize = 8;
+/// Сколько подписанных точек среза хвоста показывает `preview`.
+const TAIL_CHECKPOINT_SAMPLES: usize = 4;
 
 /// Максимальная длина имени файла экспорта.
 const EXPORT_NAME_MAX_CHARS: usize = 128;
@@ -467,12 +469,18 @@ fn compaction_projection(controller: &ContextController) -> Value {
 
 /// Список точек среза хвоста: у вида `tail` нет прогноза по `keep_recent`.
 fn tail_projection_metadata(projection: &ContextPruneProjection) -> Value {
+    let checkpoints: Vec<Value> = projection
+        .tail_checkpoint_samples(TAIL_CHECKPOINT_SAMPLES)
+        .into_iter()
+        .map(|(label, message_id)| json!({ "label": label, "after": message_id }))
+        .collect();
     json!({
         "kind": projection.kind,
         "selector": "after",
         "candidates": projection.levels.len() + projection.overflow_levels,
         "sample_after": projection.tail_cut_samples(TAIL_CUT_SAMPLES),
-        "note": "pass prune.after with one of these message ids: it and everything before it are kept",
+        "checkpoints": checkpoints,
+        "note": "pass prune.after with one of these message ids: it and everything before it are kept; checkpoints name natural cuts (compaction-boundary returns to the last compaction, session-start keeps only the oldest message)",
     })
 }
 
@@ -519,7 +527,7 @@ fn projection_metadata(
             None => json!({
                 "status": "not_available",
                 "reason": if kind == ContextPruneKind::Tail {
-                    "the snapshot has no safe cut after this message id; pick one from preview.sample_after"
+                    "the snapshot has no safe cut after this message id; pick one from preview.sample_after or preview.checkpoints"
                 } else {
                     "the snapshot does not cover this prune kind"
                 },

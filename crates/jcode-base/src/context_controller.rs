@@ -160,6 +160,11 @@ pub struct ContextPruneLevel {
     /// Id последнего сохраняемого сообщения. Заполняется только `tail`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
+    /// Подпись естественной точки среза. Заполняется только `tail`, и только
+    /// для точек, которые не зависят от выбора: граница последнего сжатия и
+    /// начало сессии. Остальные точки среза остаются безымянными.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
 }
 
 /// Проекция одного вида обрезки, снятая владельцем транскрипта.
@@ -291,6 +296,17 @@ impl ContextPruneProjection {
         self.levels
             .iter()
             .filter_map(|level| level.message_id.as_deref())
+            .take(limit)
+            .collect()
+    }
+
+    /// Подписанные точки среза хвоста: подпись и id последнего сохраняемого
+    /// сообщения. Эти точки не зависят от выбора: граница последнего сжатия и
+    /// начало сессии.
+    pub fn tail_checkpoint_samples(&self, limit: usize) -> Vec<(&str, &str)> {
+        self.levels
+            .iter()
+            .filter_map(|level| Some((level.checkpoint.as_deref()?, level.message_id.as_deref()?)))
             .take(limit)
             .collect()
     }

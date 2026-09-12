@@ -107,7 +107,7 @@ fn count_images(agent: &Agent) -> usize {
 }
 
 /// Заявка на срез хвоста после указанного сообщения.
-fn request_tail_prune(agent: &Agent, after: &str) {
+pub(super) fn request_tail_prune(agent: &Agent, after: &str) {
     let revision = agent
         .context_controller
         .lock()

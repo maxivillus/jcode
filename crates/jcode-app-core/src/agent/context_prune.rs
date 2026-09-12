@@ -18,6 +18,10 @@ const PRUNED_IMAGE_NOTE: &str = "[image pruned to save context]";
 const PRUNED_TOOL_RESULT_NOTE: &str = "[tool result pruned to save context]";
 /// Начало уже удалённого результата: такие блоки не считаются кандидатами.
 const PRUNED_TOOL_RESULT_PREFIX: &str = "[tool result pruned";
+/// Подпись точки среза на границе последнего сжатия.
+const TAIL_CHECKPOINT_COMPACTION: &str = "compaction-boundary";
+/// Подпись точки среза в начале сессии.
+const TAIL_CHECKPOINT_SESSION_START: &str = "session-start";
 
 /// Виды обрезки в порядке, в котором их показывает снимок проекции.
 const PRUNE_KINDS: [ContextPruneKind; 6] = [
@@ -125,6 +129,7 @@ fn message_levels(messages: &[StoredMessage], indices: Vec<usize>) -> Vec<Contex
                 .map_or(0, super::context_control::stored_message_token_estimate),
             items: 1,
             message_id: None,
+            checkpoint: None,
         })
         .collect()
 }
@@ -156,7 +161,11 @@ fn block_savings_tokens(block: &ContentBlock) -> usize {
 /// Уровни обрезки одного вида: от новых к старым, с оценкой экономии.
 ///
 /// Уровень turn-группы забирает все свои сообщения, поэтому он несёт их число.
-fn prune_levels(messages: &[StoredMessage], kind: ContextPruneKind) -> Vec<ContextPruneLevel> {
+fn prune_levels(
+    messages: &[StoredMessage],
+    kind: ContextPruneKind,
+    compaction_boundary: Option<usize>,
+) -> Vec<ContextPruneLevel> {
     match kind {
         ContextPruneKind::Images | ContextPruneKind::ToolResults => {
             prunable_block_positions(messages, kind)
@@ -169,6 +178,7 @@ fn prune_levels(messages: &[StoredMessage], kind: ContextPruneKind) -> Vec<Conte
                         .map_or(0, block_savings_tokens),
                     items: 1,
                     message_id: None,
+                    checkpoint: None,
                 })
                 .collect()
         }
@@ -181,7 +191,7 @@ fn prune_levels(messages: &[StoredMessage], kind: ContextPruneKind) -> Vec<Conte
             prunable_message_indices(messages, is_prunable_system_reminder),
         ),
         ContextPruneKind::Turns => turn_prune_levels(messages),
-        ContextPruneKind::Tail => tail_prune_levels(messages),
+        ContextPruneKind::Tail => tail_prune_levels(messages, compaction_boundary),
     }
 }
 
@@ -227,6 +237,7 @@ fn turn_prune_levels(messages: &[StoredMessage]) -> Vec<ContextPruneLevel> {
                     .fold(0usize, usize::saturating_add),
                 items: slice.len(),
                 message_id: None,
+                checkpoint: None,
             }
         })
         .collect()
@@ -239,11 +250,20 @@ fn turn_prune_levels(messages: &[StoredMessage]) -> Vec<ContextPruneLevel> {
 /// только самые новые точки среза, поэтому окно ограничено
 /// [`MAX_PROJECTION_LEVELS`]. Срезы, после которых в префиксе остался бы вызов
 /// без ответа, не предлагаются.
-fn tail_prune_levels(messages: &[StoredMessage]) -> Vec<ContextPruneLevel> {
+///
+/// Естественные точки среза (`compaction_boundary` и начало сессии) помечаются
+/// подписью и всегда остаются в окне: они не зависят от выбора и не должны
+/// пропадать, когда кандидатов становится больше предела.
+fn tail_prune_levels(
+    messages: &[StoredMessage],
+    compaction_boundary: Option<usize>,
+) -> Vec<ContextPruneLevel> {
     let balanced = balanced_prefix_ends(messages);
+    let checkpoints = tail_checkpoint_indices(messages, compaction_boundary);
     let mut levels = Vec::new();
     let mut tail_items = 0usize;
     let mut tail_tokens = 0usize;
+    let window = MAX_PROJECTION_LEVELS.saturating_sub(checkpoints.len());
     for (index, message) in messages.iter().enumerate().rev() {
         // Срез в конце транскрипта ничего не удаляет и не является точкой среза.
         if tail_items > 0 && balanced.get(index) == Some(&true) {
@@ -252,8 +272,12 @@ fn tail_prune_levels(messages: &[StoredMessage]) -> Vec<ContextPruneLevel> {
                 tokens: tail_tokens,
                 items: tail_items,
                 message_id: Some(message.id.clone()),
+                checkpoint: checkpoints
+                    .iter()
+                    .find(|(candidate, _)| *candidate == index)
+                    .map(|(_, label)| (*label).to_string()),
             });
-            if levels.len() >= MAX_PROJECTION_LEVELS {
+            if levels.len() >= window {
                 break;
             }
         }
@@ -262,7 +286,52 @@ fn tail_prune_levels(messages: &[StoredMessage]) -> Vec<ContextPruneLevel> {
             super::context_control::stored_message_token_estimate(message),
         );
     }
+    for (index, label) in checkpoints {
+        if levels.iter().any(|level| level.index == index) {
+            continue;
+        }
+        if balanced.get(index) != Some(&true) {
+            // Префикс до этой точки оставил бы вызов без ответа: предлагать
+            // такой срез нельзя, даже если это естественная точка.
+            continue;
+        }
+        let received = &messages[index.saturating_add(1)..];
+        levels.push(ContextPruneLevel {
+            index,
+            tokens: received.iter().fold(0usize, |total, message| {
+                total.saturating_add(super::context_control::stored_message_token_estimate(
+                    message,
+                ))
+            }),
+            items: received.len(),
+            message_id: Some(messages[index].id.clone()),
+            checkpoint: Some(label.to_string()),
+        });
+    }
     levels
+}
+
+/// Индексы сообщений, которые `tail` помечает как естественные точки среза.
+///
+/// Граница сжатия берётся из состояния compaction: `covers_up_to_turn` считает,
+/// сколько самых старых сообщений покрыто последней сводкой, поэтому срез после
+/// последнего из них возвращает транскрипт к состоянию на момент сжатия.
+fn tail_checkpoint_indices(
+    messages: &[StoredMessage],
+    compaction_boundary: Option<usize>,
+) -> Vec<(usize, &'static str)> {
+    let mut checkpoints = Vec::new();
+    if !messages.is_empty() {
+        checkpoints.push((0usize, TAIL_CHECKPOINT_SESSION_START));
+    }
+    if let Some(boundary) = compaction_boundary
+        && boundary > 0
+        && boundary <= messages.len()
+        && boundary > 1
+    {
+        checkpoints.push((boundary - 1, TAIL_CHECKPOINT_COMPACTION));
+    }
+    checkpoints
 }
 
 /// Почему обрезка ничего не удалила.
@@ -270,7 +339,7 @@ fn prune_skip_reason(spec: &ContextPruneSpec) -> String {
     match spec.kind {
         ContextPruneKind::Tail => match spec.after_message_id.as_deref() {
             Some(id) => format!(
-                "nothing to prune after message {id}: it must be one of the newest cut points preview offers and must leave no unanswered tool call"
+                "nothing to prune after message {id}: it must be one of the cut points preview offers (sample_after or checkpoints) and must leave no unanswered tool call"
             ),
             None => "tail requires after: pass the id of the last message to keep".to_string(),
         },
@@ -287,8 +356,9 @@ fn build_prune_projection(
     kind: ContextPruneKind,
     messages: &[StoredMessage],
     total_tokens: usize,
+    compaction_boundary: Option<usize>,
 ) -> ContextPruneProjection {
-    let mut levels = prune_levels(messages, kind);
+    let mut levels = prune_levels(messages, kind, compaction_boundary);
     let (overflow_levels, overflow_items, overflow_tokens) = if levels.len() > MAX_PROJECTION_LEVELS
     {
         let overflow = levels.split_off(MAX_PROJECTION_LEVELS);
@@ -444,7 +514,8 @@ impl Agent {
         let Some(after_message_id) = after_message_id else {
             return 0;
         };
-        let cut = tail_prune_levels(&self.session.messages)
+        let boundary = self.compaction_covered_messages();
+        let cut = tail_prune_levels(&self.session.messages, boundary)
             .iter()
             .find(|level| level.message_id.as_deref() == Some(after_message_id))
             .map(|level| level.index);
@@ -573,17 +644,31 @@ impl Agent {
         revision: ContextRevision,
         total_tokens: usize,
     ) {
+        let compaction_boundary = self.compaction_covered_messages();
         let projections = {
             let messages = &self.session.messages;
             PRUNE_KINDS
                 .iter()
-                .map(|kind| build_prune_projection(*kind, messages, total_tokens))
+                .map(|kind| {
+                    build_prune_projection(*kind, messages, total_tokens, compaction_boundary)
+                })
                 .collect()
         };
         self.context_controller
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .record_prune_projections(revision, projections);
+    }
+
+    /// Сколько самых старых сообщений покрыто последней сводкой сжатия.
+    ///
+    /// Значение используется только как точка среза хвоста: если оно больше
+    /// транскрипта, граница обрезается по длине.
+    fn compaction_covered_messages(&self) -> Option<usize> {
+        self.session
+            .compaction
+            .as_ref()
+            .map(|state| state.covers_up_to_turn)
     }
 
     fn context_revision(&self) -> ContextRevision {
