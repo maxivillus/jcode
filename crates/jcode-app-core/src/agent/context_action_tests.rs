@@ -880,7 +880,10 @@ async fn stale_provider_response_does_not_resume_a_stale_provider_session() {
     agent.provider_session_id = Some("provider-session".to_string());
     agent.session.provider_session_id = Some("provider-session".to_string());
 
-    agent.record_context_usage(request_revision, Some(1_234));
+    assert!(
+        !agent.record_context_usage(request_revision, Some(1_234)),
+        "a stale provider response must be rejected by the commit gate"
+    );
 
     assert!(agent.provider_session_id.is_none());
     assert!(agent.session.provider_session_id.is_none());

@@ -248,6 +248,8 @@ impl Agent {
     /// Возвращает `false` для устаревшего ответа: usage не записывается, а
     /// resumable provider session сбрасывается. Ответ без usage тоже
     /// проверяется, поэтому окно устаревания не зависит от провайдера.
+    /// Вызывающий код обязан при `false` отбросить содержимое ответа и его
+    /// tool calls, не сохраняя и не исполняя их.
     pub(super) fn record_context_usage(
         &mut self,
         revision: ContextRevision,

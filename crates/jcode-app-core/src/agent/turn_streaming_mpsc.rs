@@ -1016,7 +1016,14 @@ impl Agent {
                 cache_read_input_tokens: usage_cache_read,
                 cache_creation_input_tokens: usage_cache_creation,
             };
-            self.record_context_usage(context_revision, usage_input);
+            if !self.record_context_usage(context_revision, usage_input) {
+                // Дельты могли уже попасть в клиент. Очищаем live-текст перед
+                // завершением turn-а, не сохраняем и не исполняем stale-ответ.
+                let _ = event_tx.send(ServerEvent::TextReplace {
+                    text: String::new(),
+                });
+                break;
+            }
 
             // Detect a transparent mid-request model switch (e.g. Anthropic's
             // retired `claude-fable-5` falling back to `claude-opus-4-8`). The

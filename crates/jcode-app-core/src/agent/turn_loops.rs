@@ -767,7 +767,11 @@ impl Agent {
                 cache_read_input_tokens: usage_cache_read,
                 cache_creation_input_tokens: usage_cache_creation,
             };
-            self.record_context_usage(context_revision, usage_input);
+            if !self.record_context_usage(context_revision, usage_input) {
+                // Ответ собран по транскрипту, который уже не актуален.
+                // Не сохраняем и не исполняем ни одну его часть.
+                break;
+            }
 
             self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
 
