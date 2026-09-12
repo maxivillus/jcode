@@ -135,6 +135,7 @@ fn schema_exposes_read_only_and_queued_actions() {
         json!([
             "images",
             "memory-injections",
+            "system-reminders",
             "tool-results",
             "turns",
             "tail"

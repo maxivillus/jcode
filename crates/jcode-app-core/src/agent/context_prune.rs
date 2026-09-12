@@ -10,6 +10,8 @@ use crate::tool_pairing::{balanced_prefix_ends, balanced_suffix_start, first_gap
 
 /// Начало сообщения memory-инъекции, как его собирает `memory_injection_message`.
 const MEMORY_INJECTION_MARKER: &str = "<system-reminder>\n# Memory\n";
+/// Тег системного напоминания харнесса.
+const SYSTEM_REMINDER_PREFIX: &str = "<system-reminder>";
 /// Заметка, которой заменяется удалённое изображение.
 const PRUNED_IMAGE_NOTE: &str = "[image pruned to save context]";
 /// Заметка, которой заменяется удалённый результат инструмента.
@@ -18,9 +20,10 @@ const PRUNED_TOOL_RESULT_NOTE: &str = "[tool result pruned to save context]";
 const PRUNED_TOOL_RESULT_PREFIX: &str = "[tool result pruned";
 
 /// Виды обрезки в порядке, в котором их показывает снимок проекции.
-const PRUNE_KINDS: [ContextPruneKind; 5] = [
+const PRUNE_KINDS: [ContextPruneKind; 6] = [
     ContextPruneKind::Images,
     ContextPruneKind::MemoryInjections,
+    ContextPruneKind::SystemReminders,
     ContextPruneKind::ToolResults,
     ContextPruneKind::Turns,
     ContextPruneKind::Tail,
@@ -32,6 +35,33 @@ fn is_memory_injection(message: &StoredMessage) -> bool {
             ContentBlock::Text { text, .. } => text.starts_with(MEMORY_INJECTION_MARKER),
             _ => false,
         })
+}
+
+/// Системное напоминание, которое обрезка может удалить целиком.
+///
+/// Так харнесс добавляет стартовый `# Session Context`, `# Environment` и
+/// транзитные подсказки. Memory-инъекции исключены: у них свой вид
+/// `memory-injections`. Сообщения с блоками вызова или результата инструмента
+/// исключены, потому что их удаление разорвало бы пару.
+pub(super) fn is_prunable_system_reminder(message: &StoredMessage) -> bool {
+    if message.role != Role::User || is_memory_injection(message) {
+        return false;
+    }
+    let is_reminder = message
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.trim_start()),
+            _ => None,
+        })
+        .is_some_and(|text| text.starts_with(SYSTEM_REMINDER_PREFIX));
+    let has_tool_block = message.content.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. }
+        )
+    });
+    is_reminder && !has_tool_block
 }
 
 /// Позиция блока внутри транскрипта.
@@ -70,14 +100,32 @@ fn prunable_block_positions(
     positions
 }
 
-/// Позиции memory-инъекций, которые обрезка может удалить целиком.
-fn prunable_memory_injections(messages: &[StoredMessage]) -> Vec<usize> {
+/// Позиции сообщений, которые обрезка удаляет целиком: от новых к старым.
+fn prunable_message_indices(
+    messages: &[StoredMessage],
+    prune: impl Fn(&StoredMessage) -> bool,
+) -> Vec<usize> {
     messages
         .iter()
         .enumerate()
         .rev()
-        .filter(|(_, message)| is_memory_injection(message))
+        .filter(|(_, message)| prune(message))
         .map(|(index, _)| index)
+        .collect()
+}
+
+/// Уровни проекции для видов, которые удаляют сообщение целиком.
+fn message_levels(messages: &[StoredMessage], indices: Vec<usize>) -> Vec<ContextPruneLevel> {
+    indices
+        .into_iter()
+        .map(|index| ContextPruneLevel {
+            index,
+            tokens: messages
+                .get(index)
+                .map_or(0, super::context_control::stored_message_token_estimate),
+            items: 1,
+            message_id: None,
+        })
         .collect()
 }
 
@@ -124,17 +172,14 @@ fn prune_levels(messages: &[StoredMessage], kind: ContextPruneKind) -> Vec<Conte
                 })
                 .collect()
         }
-        ContextPruneKind::MemoryInjections => prunable_memory_injections(messages)
-            .into_iter()
-            .map(|index| ContextPruneLevel {
-                index,
-                tokens: messages
-                    .get(index)
-                    .map_or(0, super::context_control::stored_message_token_estimate),
-                items: 1,
-                message_id: None,
-            })
-            .collect(),
+        ContextPruneKind::MemoryInjections => message_levels(
+            messages,
+            prunable_message_indices(messages, is_memory_injection),
+        ),
+        ContextPruneKind::SystemReminders => message_levels(
+            messages,
+            prunable_message_indices(messages, is_prunable_system_reminder),
+        ),
         ContextPruneKind::Turns => turn_prune_levels(messages),
         ContextPruneKind::Tail => tail_prune_levels(messages),
     }
@@ -285,8 +330,9 @@ impl Agent {
     ///
     /// Каждый вид режет только свой тип данных: изображения и результаты
     /// инструментов заменяются короткой заметкой (парность tool_use и
-    /// tool_result сохраняется), а лишние старые turn-группы удаляются
-    /// целиком. Перед изменением сохраняется снапшот истории для undo.
+    /// tool_result сохраняется), а лишние старые turn-группы, memory-инъекции
+    /// и системные напоминания удаляются целиком. Перед изменением сохраняется
+    /// снапшот истории для undo.
     pub(super) fn prune_for_model_request(
         &mut self,
         spec: ContextPruneSpec,
@@ -376,7 +422,12 @@ impl Agent {
                 self.replace_prunable_blocks(kind, &positions, keep_recent)
             }
             ContextPruneKind::MemoryInjections => {
-                let targets = prunable_memory_injections(&self.session.messages);
+                let targets = prunable_message_indices(&self.session.messages, is_memory_injection);
+                self.drop_messages(&targets, keep_recent)
+            }
+            ContextPruneKind::SystemReminders => {
+                let targets =
+                    prunable_message_indices(&self.session.messages, is_prunable_system_reminder);
                 self.drop_messages(&targets, keep_recent)
             }
             ContextPruneKind::Turns => self.drop_turn_prefix(keep_recent),
