@@ -64,6 +64,9 @@ pub enum ContextActionKind {
 pub enum ContextPruneKind {
     Images,
     MemoryInjections,
+    /// Системные напоминания харнесса (`<system-reminder>`), кроме
+    /// memory-инъекций: у них свой вид `memory-injections`.
+    SystemReminders,
     ToolResults,
     Turns,
     /// Хвост после выбранного сообщения: `after` задаёт последнее
@@ -113,6 +116,7 @@ impl ContextPruneKind {
         match self {
             Self::Images => 1,
             Self::MemoryInjections => 1,
+            Self::SystemReminders => 1,
             Self::ToolResults => 2,
             Self::Turns => 6,
             Self::Tail => 0,
@@ -126,7 +130,7 @@ impl ContextPruneKind {
     pub fn min_keep_recent(self) -> usize {
         match self {
             Self::Turns => 1,
-            Self::Images | Self::MemoryInjections | Self::ToolResults => 0,
+            Self::Images | Self::MemoryInjections | Self::SystemReminders | Self::ToolResults => 0,
             Self::Tail => 0,
         }
     }

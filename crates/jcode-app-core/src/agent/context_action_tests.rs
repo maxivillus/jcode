@@ -45,13 +45,13 @@ impl Provider for StubProvider {
     }
 }
 
-async fn test_agent() -> Agent {
+pub(super) async fn test_agent() -> Agent {
     let provider: Arc<dyn Provider> = Arc::new(StubProvider);
     let registry = Registry::new(Arc::clone(&provider)).await;
     Agent::new(provider, registry)
 }
 
-fn request_action(agent: &Agent, action: ContextActionKind) {
+pub(super) fn request_action(agent: &Agent, action: ContextActionKind) {
     let revision = agent
         .context_controller
         .lock()
@@ -66,7 +66,7 @@ fn request_action(agent: &Agent, action: ContextActionKind) {
         .expect("request should be accepted");
 }
 
-fn last_outcome(agent: &Agent) -> ContextActionOutcome {
+pub(super) fn last_outcome(agent: &Agent) -> ContextActionOutcome {
     agent
         .context_controller
         .lock()
@@ -77,7 +77,7 @@ fn last_outcome(agent: &Agent) -> ContextActionOutcome {
         .clone()
 }
 
-fn request_prune(agent: &Agent, kind: ContextPruneKind, keep_recent: Option<usize>) {
+pub(super) fn request_prune(agent: &Agent, kind: ContextPruneKind, keep_recent: Option<usize>) {
     let revision = agent
         .context_controller
         .lock()
@@ -163,7 +163,7 @@ fn pending_memory(computed_at: std::time::Instant) -> crate::memory::PendingMemo
 }
 
 /// Разбирает оценку размера из результата обрезки: `... estimated tokens A -> B`.
-fn estimated_tokens(detail: &str) -> (usize, usize) {
+pub(super) fn estimated_tokens(detail: &str) -> (usize, usize) {
     let tail = detail
         .split("estimated tokens ")
         .nth(1)
@@ -177,7 +177,7 @@ fn estimated_tokens(detail: &str) -> (usize, usize) {
     )
 }
 
-fn completed_detail(agent: &Agent) -> String {
+pub(super) fn completed_detail(agent: &Agent) -> String {
     match last_outcome(agent) {
         ContextActionOutcome::Completed { detail } => detail,
         other => panic!("expected Completed outcome, got {other:?}"),
@@ -185,7 +185,7 @@ fn completed_detail(agent: &Agent) -> String {
 }
 
 /// Расчёт обрезки из снимка, который снимает preflight на границе turn-а.
-fn prune_forecast(
+pub(super) fn prune_forecast(
     agent: &Agent,
     kind: ContextPruneKind,
     keep_recent: Option<usize>,
@@ -203,7 +203,7 @@ fn prune_forecast(
 }
 
 /// Снимает проекцию так же, как preflight перед запросом.
-fn record_preview_snapshot(agent: &mut Agent) {
+pub(super) fn record_preview_snapshot(agent: &mut Agent) {
     let messages = agent.session.messages_for_provider_uncached();
     let prompt = agent.build_system_prompt_split(None);
     agent.prepare_context_preflight(&messages, &[], &prompt);

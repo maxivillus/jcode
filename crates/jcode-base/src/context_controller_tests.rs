@@ -297,6 +297,7 @@ fn projection(
 fn prune_defaults_are_shared_with_the_apply_path() {
     assert_eq!(ContextPruneKind::Images.default_keep_recent(), 1);
     assert_eq!(ContextPruneKind::MemoryInjections.default_keep_recent(), 1);
+    assert_eq!(ContextPruneKind::SystemReminders.default_keep_recent(), 1);
     assert_eq!(ContextPruneKind::ToolResults.default_keep_recent(), 2);
     assert_eq!(ContextPruneKind::Turns.default_keep_recent(), 6);
     assert_eq!(
@@ -311,6 +312,7 @@ fn prune_keep_recent_floors_keep_the_transcript_usable() {
     assert_eq!(ContextPruneKind::Turns.min_keep_recent(), 1);
     assert_eq!(ContextPruneKind::Images.min_keep_recent(), 0);
     assert_eq!(ContextPruneKind::MemoryInjections.min_keep_recent(), 0);
+    assert_eq!(ContextPruneKind::SystemReminders.min_keep_recent(), 0);
     assert_eq!(ContextPruneKind::ToolResults.min_keep_recent(), 0);
     assert_eq!(ContextPruneKind::Tail.min_keep_recent(), 0);
 }

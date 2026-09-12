@@ -413,6 +413,7 @@ fn parse_prune_spec(input: &ContextPruneInput) -> Result<ContextPruneSpec> {
     let kind = match input.kind.as_str() {
         "images" => ContextPruneKind::Images,
         "memory-injections" => ContextPruneKind::MemoryInjections,
+        "system-reminders" => ContextPruneKind::SystemReminders,
         "tool-results" => ContextPruneKind::ToolResults,
         "turns" => ContextPruneKind::Turns,
         "tail" => ContextPruneKind::Tail,
@@ -596,7 +597,7 @@ impl Tool for ContextControlTool {
                     "properties": {
                         "kind": {
                             "type": "string",
-                            "enum": ["images", "memory-injections", "tool-results", "turns", "tail"],
+                            "enum": ["images", "memory-injections", "system-reminders", "tool-results", "turns", "tail"],
                             "description": "Structural data to prune.",
                         },
                         "keep_recent": {
@@ -692,7 +693,7 @@ impl Tool for ContextControlTool {
                 let request = if action == "prune" {
                     let input = params.prune.as_ref().ok_or_else(|| {
                         anyhow::anyhow!(
-                            "prune spec is required for `prune`; pass kind images|memory-injections|tool-results|turns|tail"
+                            "prune spec is required for `prune`; pass kind images|memory-injections|system-reminders|tool-results|turns|tail"
                         )
                     })?;
                     let spec = parse_prune_spec(input)?;
