@@ -1132,9 +1132,14 @@ impl Agent {
 }
 
 fn clear_stale_stream_text(event_tx: &mpsc::UnboundedSender<ServerEvent>) {
-    let _ = event_tx.send(ServerEvent::TextReplace {
-        text: String::new(),
-    });
+    if event_tx
+        .send(ServerEvent::TextReplace {
+            text: String::new(),
+        })
+        .is_err()
+    {
+        logging::debug("Клиентский event channel закрыт при очистке stale response");
+    }
 }
 
 #[cfg(test)]
