@@ -237,6 +237,11 @@ impl Agent {
     /// Provider-side resumable sessions are reset so the next request sends the
     /// truncated context from scratch instead of continuing from a stale upstream
     /// conversation.
+    ///
+    /// A cut that would keep a tool call without its result is refused: providers
+    /// either reject such a request or silently drop the tool output. The check
+    /// runs before the transcript changes, so a refused rewind leaves history and
+    /// the undo snapshot untouched.
     pub fn rewind_to_message(&mut self, message_index: usize) -> Result<usize, String> {
         let targets = self.session.rewind_target_stored_indices();
         let message_count = targets.len();
@@ -247,6 +252,11 @@ impl Agent {
             ));
         }
         let stored_len = targets[message_index - 1] + 1;
+        if let Some(gap) = crate::tool_pairing::first_gap(&self.session.messages[..stored_len]) {
+            return Err(format!(
+                "Rewind refused: {gap}; rewind one message earlier to keep the tool pair whole"
+            ));
+        }
 
         let removed = message_count - message_index;
         self.rewind_undo_snapshot = Some(RewindUndoSnapshot {

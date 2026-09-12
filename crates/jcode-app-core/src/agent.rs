@@ -1144,5 +1144,8 @@ mod context_prune_tail_checkpoint_tests;
 mod skill_prompt_tests;
 
 #[cfg(test)]
+mod rewind_pairing_tests;
+
+#[cfg(test)]
 #[path = "agent_tests.rs"]
 mod tests;
