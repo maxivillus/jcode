@@ -2,7 +2,7 @@ use super::{Tool, ToolContext, ToolOutput, skill_state};
 use crate::context::ContextRevision;
 use crate::context_controller::{
     ContextActionKind, ContextController, ContextPruneForecast, ContextPruneKind,
-    ContextPruneProjection, ContextPruneSpec,
+    ContextPruneProjection, ContextPruneSpec, ContextRequestOrigin,
 };
 use anyhow::{Result, bail};
 use async_trait::async_trait;
@@ -606,7 +606,7 @@ impl Tool for ContextControlTool {
                         "kind": {
                             "type": "string",
                             "enum": ["images", "memory-injections", "system-reminders", "tool-results", "turns", "tail"],
-                            "description": "Structural data to prune.",
+                            "description": "Structural data to prune. `turns` and `tail` erase whole structural units: preview projects them, but only an explicit user command (/context prune) can queue them.",
                         },
                         "keep_recent": {
                             "type": "integer",
@@ -706,7 +706,7 @@ impl Tool for ContextControlTool {
                     })?;
                     let spec = parse_prune_spec(input)?;
                     controller
-                        .request_prune(spec, ContextRevision(expected))
+                        .request_prune(ContextRequestOrigin::Model, spec, ContextRevision(expected))
                         .map_err(|error| anyhow::anyhow!("{error}"))?
                 } else {
                     controller

@@ -43,6 +43,17 @@ impl ContextPreflightPlan {
     }
 }
 
+/// Кто просит изменить контекст.
+///
+/// Заявка модели проходит проверку политики, заявка пользователя это уже
+/// подтверждённое явное действие. Разделение находится в runtime, поэтому
+/// инструмент модели не является единственной защитой.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextRequestOrigin {
+    Model,
+    User,
+}
+
 /// Действие над контекстом, запрошенное моделью.
 ///
 /// Запрос не исполняется в момент вызова: runtime применяет его на
@@ -109,6 +120,26 @@ impl ContextPruneSpec {
 }
 
 impl ContextPruneKind {
+    /// Вид, который стирает целые структурные единицы.
+    ///
+    /// Такие виды ставит только явная команда пользователя: они могут унести
+    /// часть диалога, поэтому модель их не запрашивает.
+    pub fn user_only(self) -> bool {
+        matches!(self, Self::Turns | Self::Tail)
+    }
+
+    /// Имя вида в схеме инструмента и в команде `/context prune`.
+    pub fn tool_name(self) -> &'static str {
+        match self {
+            Self::Images => "images",
+            Self::MemoryInjections => "memory-injections",
+            Self::SystemReminders => "system-reminders",
+            Self::ToolResults => "tool-results",
+            Self::Turns => "turns",
+            Self::Tail => "tail",
+        }
+    }
+
     /// Сколько последних элементов этот вид обрезки щадит по умолчанию.
     ///
     /// `tail` не использует `keep_recent`: его срез задаёт `after`.
@@ -372,6 +403,8 @@ pub enum ContextActionError {
         expected: ContextRevision,
         current: ContextRevision,
     },
+    /// Вид обрезки доступен только явной команде пользователя.
+    UserOnlyKind { kind: ContextPruneKind },
 }
 
 impl std::fmt::Display for ContextActionError {
@@ -381,6 +414,11 @@ impl std::fmt::Display for ContextActionError {
                 formatter,
                 "context revision changed from {} to {}; read status again",
                 expected.0, current.0
+            ),
+            Self::UserOnlyKind { kind } => write!(
+                formatter,
+                "`{kind:?}` prunes whole structural units and is queued only by an explicit user command (/context prune {}); the model may preview it but not request it",
+                kind.tool_name()
             ),
         }
     }
@@ -467,11 +505,19 @@ impl ContextController {
     }
 
     /// Ставит запрос структурной обрезки с явными параметрами.
+    ///
+    /// `origin` решает политику: модель не может запрашивать виды, которые
+    /// стирают целые структурные единицы (`turns`, `tail`), их ставит только
+    /// явная команда пользователя.
     pub fn request_prune(
         &mut self,
+        origin: ContextRequestOrigin,
         spec: ContextPruneSpec,
         expected_revision: ContextRevision,
     ) -> Result<ContextActionRequest, ContextActionError> {
+        if origin == ContextRequestOrigin::Model && spec.kind.user_only() {
+            return Err(ContextActionError::UserOnlyKind { kind: spec.kind });
+        }
         self.request_action_with_prune(ContextActionKind::Prune, expected_revision, Some(spec))
     }
 
