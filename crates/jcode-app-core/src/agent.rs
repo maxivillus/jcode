@@ -1131,6 +1131,12 @@ impl Agent {
     }
 }
 
+fn clear_stale_stream_text(event_tx: &mpsc::UnboundedSender<ServerEvent>) {
+    let _ = event_tx.send(ServerEvent::TextReplace {
+        text: String::new(),
+    });
+}
+
 #[cfg(test)]
 mod context_action_tests;
 

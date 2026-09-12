@@ -768,8 +768,6 @@ impl Agent {
                 cache_creation_input_tokens: usage_cache_creation,
             };
             if !self.record_context_usage(context_revision, usage_input) {
-                // Ответ собран по транскрипту, который уже не актуален.
-                // Не сохраняем и не исполняем ни одну его часть.
                 break;
             }
 
