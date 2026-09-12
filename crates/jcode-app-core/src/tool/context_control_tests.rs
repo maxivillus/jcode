@@ -512,7 +512,7 @@ async fn preview_lists_tail_cut_candidates_and_projects_the_requested_cut() {
 }
 
 #[tokio::test]
-async fn tail_prune_is_queued_with_its_cut_message() {
+async fn tail_prune_is_refused_for_the_model() {
     let (tool, controller, ctx) = bound_tool("context-tail-queued");
     let revision = controller
         .lock()
@@ -521,7 +521,7 @@ async fn tail_prune_is_queued_with_its_cut_message() {
         .revision
         .0;
 
-    let result = tool
+    let error = tool
         .execute(
             json!({
                 "action": "prune",
@@ -531,13 +531,11 @@ async fn tail_prune_is_queued_with_its_cut_message() {
             ctx,
         )
         .await
-        .expect("fresh tail prune request is accepted");
-    let metadata = result.metadata.expect("metadata");
-
-    assert_eq!(metadata["queued"], json!(true));
-    assert_eq!(metadata["request"]["prune"]["kind"], json!("tail"));
-    assert_eq!(metadata["request"]["prune"]["after"], json!("message-4"));
-    assert_eq!(metadata["request"]["prune"]["keep_recent"], Value::Null);
+        .expect_err("tail prunes whole structural units and only the user may request one");
+    assert!(
+        error.to_string().contains("/context prune"),
+        "the refusal must name the user command: {error}"
+    );
 }
 
 #[tokio::test]

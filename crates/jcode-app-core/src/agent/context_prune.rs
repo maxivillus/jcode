@@ -2,7 +2,8 @@ use super::Agent;
 use crate::context::ContextRevision;
 use crate::context_controller::{
     ContextActionKind, ContextActionOutcome, ContextActionRequest, ContextPruneKind,
-    ContextPruneLevel, ContextPruneProjection, ContextPruneSpec, MAX_PROJECTION_LEVELS,
+    ContextPruneLevel, ContextPruneProjection, ContextPruneSpec, ContextRequestOrigin,
+    MAX_PROJECTION_LEVELS,
 };
 use crate::message::{ContentBlock, Message, Role};
 use crate::session::StoredMessage;
@@ -470,7 +471,7 @@ impl Agent {
         self.context_controller
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .request_prune(spec, revision)
+            .request_prune(ContextRequestOrigin::User, spec, revision)
             .map_err(|error| error.to_string())
     }
 

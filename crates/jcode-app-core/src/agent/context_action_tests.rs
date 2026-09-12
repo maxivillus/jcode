@@ -2,7 +2,7 @@ use super::Agent;
 use crate::context::{ContextBudget, ContextComponentHashes, ContextRevision};
 use crate::context_controller::{
     ContextActionKind, ContextActionOutcome, ContextPruneForecast, ContextPruneKind,
-    ContextPruneSpec,
+    ContextPruneSpec, ContextRequestOrigin,
 };
 use crate::message::{ContentBlock, Message, Role, ToolDefinition};
 use crate::provider::{EventStream, Provider};
@@ -92,7 +92,7 @@ pub(super) fn request_prune(agent: &Agent, kind: ContextPruneKind, keep_recent: 
         .context_controller
         .lock()
         .expect("controller lock")
-        .request_prune(spec, revision)
+        .request_prune(ContextRequestOrigin::User, spec, revision)
         .expect("prune request should be accepted");
 }
 
@@ -119,6 +119,7 @@ pub(super) fn request_tail_prune(agent: &Agent, after: &str) {
         .lock()
         .expect("controller lock")
         .request_prune(
+            ContextRequestOrigin::User,
             ContextPruneSpec::new(ContextPruneKind::Tail).after(after),
             revision,
         )
@@ -1109,6 +1110,48 @@ async fn tail_prune_skips_a_cut_that_leaves_an_unanswered_tool_call() {
         stored_before,
         "the transcript must stay intact"
     );
+}
+
+#[tokio::test]
+async fn the_model_cannot_queue_user_only_prunes() {
+    let mut agent = test_agent().await;
+    for index in 0..4 {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("turn {index}"),
+                cache_control: None,
+            }],
+        );
+    }
+    let revision = agent
+        .context_controller
+        .lock()
+        .expect("controller lock")
+        .manifest()
+        .revision;
+
+    for kind in [ContextPruneKind::Turns, ContextPruneKind::Tail] {
+        let spec = if kind == ContextPruneKind::Tail {
+            ContextPruneSpec::new(kind).after("message-1")
+        } else {
+            ContextPruneSpec::new(kind)
+        };
+        let error = agent
+            .context_controller
+            .lock()
+            .expect("controller lock")
+            .request_prune(ContextRequestOrigin::Model, spec, revision)
+            .expect_err("the model must not queue user-only kinds");
+        assert!(
+            error.to_string().contains("/context prune"),
+            "the refusal must name the user command: {error}"
+        );
+    }
+
+    agent
+        .queue_user_prune(ContextPruneSpec::new(ContextPruneKind::Turns).keep_recent(1))
+        .expect("the user route must accept the same kind");
 }
 
 #[tokio::test]

@@ -349,6 +349,42 @@ fn tail_checkpoint_samples_name_only_marked_cuts() {
 }
 
 #[test]
+fn model_requests_cannot_use_user_only_prune_kinds() {
+    let mut controller = ContextController::default();
+    let revision = controller.manifest().revision;
+
+    for kind in [ContextPruneKind::Turns, ContextPruneKind::Tail] {
+        assert!(kind.user_only());
+        let error = controller
+            .request_prune(
+                ContextRequestOrigin::Model,
+                ContextPruneSpec::new(kind),
+                revision,
+            )
+            .expect_err("the model must not queue user-only kinds");
+        assert!(
+            error.to_string().contains("/context prune"),
+            "the refusal must name the user command: {error}"
+        );
+    }
+
+    controller
+        .request_prune(
+            ContextRequestOrigin::User,
+            ContextPruneSpec::new(ContextPruneKind::Turns),
+            revision,
+        )
+        .expect("the user route must accept the same kind");
+    controller
+        .request_prune(
+            ContextRequestOrigin::Model,
+            ContextPruneSpec::new(ContextPruneKind::Images),
+            revision,
+        )
+        .expect("safe kinds stay available to the model");
+}
+
+#[test]
 fn forecast_keeps_newest_levels_and_reports_savings() {
     let projection = projection(
         ContextPruneKind::Images,
