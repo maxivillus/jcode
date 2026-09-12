@@ -2,8 +2,7 @@ use super::*;
 use crate::agent::environment::EnvSnapshotDetail;
 use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
-use crate::tool::Registry;
-use crate::tool::ToolOutput;
+use crate::tool::{Registry, ToolOutput};
 use async_trait::async_trait;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -1986,6 +1985,7 @@ async fn empty_post_tool_response_is_retried_in_shared_helper() {
 }
 
 include!("agent_tests/retention_readiness.rs");
+include!("agent_tests/stale_provider_response.rs");
 
 /// Provider that reproduces the DeepSWE Opus 5 incident: the first response
 /// ends with `stop_reason: "tool_use"` while carrying no tool-use block at all,

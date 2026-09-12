@@ -1131,6 +1131,17 @@ impl Agent {
     }
 }
 
+fn clear_stale_stream_text(event_tx: &mpsc::UnboundedSender<ServerEvent>) {
+    if event_tx
+        .send(ServerEvent::TextReplace {
+            text: String::new(),
+        })
+        .is_err()
+    {
+        logging::debug("Клиентский event channel закрыт при очистке stale response");
+    }
+}
+
 #[cfg(test)]
 mod context_action_tests;
 
@@ -1142,6 +1153,9 @@ mod context_prune_tail_checkpoint_tests;
 
 #[cfg(test)]
 mod skill_prompt_tests;
+
+#[cfg(test)]
+mod rewind_pairing_tests;
 
 #[cfg(test)]
 #[path = "agent_tests.rs"]

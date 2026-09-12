@@ -1016,8 +1016,10 @@ impl Agent {
                 cache_read_input_tokens: usage_cache_read,
                 cache_creation_input_tokens: usage_cache_creation,
             };
-            self.record_context_usage(context_revision, usage_input);
-
+            if !self.record_context_usage(context_revision, usage_input) {
+                clear_stale_stream_text(&event_tx);
+                break;
+            }
             // Detect a transparent mid-request model switch (e.g. Anthropic's
             // retired `claude-fable-5` falling back to `claude-opus-4-8`). The
             // provider mutates its own model state during the stream, so the
