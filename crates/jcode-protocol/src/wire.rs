@@ -91,6 +91,18 @@ pub enum Request {
     #[serde(rename = "rewind_undo")]
     RewindUndo { id: u64 },
 
+    /// Queue a structural prune that only the user may request.
+    ///
+    /// The model-facing `context_control` tool rejects these kinds; the client
+    /// sends them here after an explicit user command.
+    #[serde(rename = "context_prune")]
+    ContextPrune {
+        id: u64,
+        kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keep_recent: Option<usize>,
+    },
+
     /// Health check
     #[serde(rename = "ping")]
     Ping { id: u64 },
@@ -1446,6 +1458,16 @@ pub enum ServerEvent {
         /// Human-readable status message
         message: String,
         /// Whether compaction was started successfully
+        success: bool,
+    },
+
+    /// Ответ на пользовательский запрос обрезки контекста
+    #[serde(rename = "context_prune_result")]
+    ContextPruneResult {
+        id: u64,
+        /// Human-readable status message
+        message: String,
+        /// Whether the prune was queued
         success: bool,
     },
 

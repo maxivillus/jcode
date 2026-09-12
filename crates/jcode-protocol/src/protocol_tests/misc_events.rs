@@ -1,4 +1,49 @@
 #[test]
+fn test_context_prune_roundtrip() -> Result<()> {
+    let request = Request::ContextPrune {
+        id: 91,
+        kind: "turns".to_string(),
+        keep_recent: Some(4),
+    };
+    let json = serde_json::to_string(&request)?;
+    assert!(json.contains("\"type\":\"context_prune\""));
+    let decoded = parse_request_json(&json)?;
+    assert_eq!(decoded.id(), 91);
+    let Request::ContextPrune {
+        kind,
+        keep_recent,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("expected ContextPrune request"));
+    };
+    assert_eq!(kind, "turns");
+    assert_eq!(keep_recent, Some(4));
+
+    let event = ServerEvent::ContextPruneResult {
+        id: 91,
+        message: "queued".to_string(),
+        success: true,
+    };
+    let json = serde_json::to_string(&event)?;
+    assert!(json.contains("\"type\":\"context_prune_result\""));
+    let decoded: ServerEvent = serde_json::from_str(&json)?;
+    let ServerEvent::ContextPruneResult {
+        id,
+        message,
+        success,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("expected ContextPruneResult event"));
+    };
+    assert_eq!(id, 91);
+    assert_eq!(message, "queued");
+    assert!(success);
+    Ok(())
+}
+
+#[test]
 fn test_transcript_request_roundtrip() -> Result<()> {
     let req = Request::Transcript {
         id: 77,

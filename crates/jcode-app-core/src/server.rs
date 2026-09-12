@@ -20,6 +20,7 @@ mod comm_graph;
 mod comm_plan;
 mod comm_session;
 mod comm_sync;
+mod context_prune_action;
 mod debug;
 mod debug_ambient;
 mod debug_command_exec;

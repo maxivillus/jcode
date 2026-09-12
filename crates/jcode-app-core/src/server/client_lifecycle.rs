@@ -38,6 +38,7 @@ use super::comm_sync::{
     CommResyncPlanContext, handle_comm_plan_status, handle_comm_read_context,
     handle_comm_resync_plan, handle_comm_status, handle_comm_summary,
 };
+use super::context_prune_action::handle_context_prune;
 use super::provider_control::{
     handle_cycle_model, handle_notify_auth_changed, handle_refresh_models,
     handle_set_compaction_mode, handle_set_model, handle_set_premium_mode,
@@ -1971,6 +1972,24 @@ pub(super) async fn handle_client(
                     continue;
                 }
                 handle_reset_provider(id, &agent, &client_event_tx);
+            }
+
+            Request::ContextPrune {
+                id,
+                kind,
+                keep_recent,
+            } => {
+                if reject_if_agent_busy_for_request(
+                    id,
+                    "context_prune",
+                    &client_session_id,
+                    client_is_processing,
+                    &agent,
+                    &client_event_tx,
+                ) {
+                    continue;
+                }
+                handle_context_prune(id, &kind, keep_recent, &agent, &client_event_tx);
             }
 
             Request::TriggerMemoryExtraction { id } => {

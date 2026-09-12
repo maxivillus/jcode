@@ -2880,6 +2880,18 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             false
         }
+        ServerEvent::ContextPruneResult {
+            message, success, ..
+        } => {
+            if success {
+                app.push_display_message(DisplayMessage::system(message));
+                app.set_status_notice("Обрезка контекста поставлена в очередь");
+            } else {
+                app.push_display_message(DisplayMessage::error(message));
+                app.set_status_notice("Обрезка контекста не выполнена");
+            }
+            false
+        }
         ServerEvent::ProviderResetResult {
             message, success, ..
         } => {
