@@ -251,6 +251,7 @@ fn level(index: usize, tokens: usize) -> ContextPruneLevel {
         tokens,
         items: 1,
         message_id: None,
+        checkpoint: None,
     }
 }
 
@@ -261,6 +262,7 @@ fn group(index: usize, tokens: usize, items: usize) -> ContextPruneLevel {
         tokens,
         items,
         message_id: None,
+        checkpoint: None,
     }
 }
 
@@ -271,6 +273,7 @@ fn tail_cut(index: usize, tokens: usize, items: usize, message_id: &str) -> Cont
         tokens,
         items,
         message_id: Some(message_id.to_string()),
+        checkpoint: None,
     }
 }
 
@@ -315,6 +318,34 @@ fn prune_keep_recent_floors_keep_the_transcript_usable() {
     assert_eq!(ContextPruneKind::SystemReminders.min_keep_recent(), 0);
     assert_eq!(ContextPruneKind::ToolResults.min_keep_recent(), 0);
     assert_eq!(ContextPruneKind::Tail.min_keep_recent(), 0);
+}
+
+#[test]
+fn tail_checkpoint_samples_name_only_marked_cuts() {
+    let projection = projection(
+        ContextPruneKind::Tail,
+        vec![
+            tail_cut(9, 10, 1, "message-9"),
+            ContextPruneLevel {
+                checkpoint: Some("compaction-boundary".to_string()),
+                ..tail_cut(4, 20, 2, "message-4")
+            },
+        ],
+        0,
+        0,
+        0,
+        100,
+    );
+
+    assert_eq!(
+        projection.tail_checkpoint_samples(4),
+        vec![("compaction-boundary", "message-4")]
+    );
+    assert_eq!(
+        projection.tail_cut_samples(4),
+        vec!["message-9", "message-4"],
+        "a named cut must stay an ordinary cut point for the apply path"
+    );
 }
 
 #[test]

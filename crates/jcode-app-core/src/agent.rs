@@ -1138,5 +1138,8 @@ mod context_action_tests;
 mod context_prune_system_reminder_tests;
 
 #[cfg(test)]
+mod context_prune_tail_checkpoint_tests;
+
+#[cfg(test)]
 #[path = "agent_tests.rs"]
 mod tests;
