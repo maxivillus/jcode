@@ -1110,3 +1110,41 @@ async fn tail_prune_skips_a_cut_that_leaves_an_unanswered_tool_call() {
         "the transcript must stay intact"
     );
 }
+
+#[tokio::test]
+async fn user_command_queues_a_turn_prune_and_its_undo() {
+    let mut agent = test_agent().await;
+    for index in 0..8 {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("turn {index}"),
+                cache_control: None,
+            }],
+        );
+    }
+    let before = agent.session.messages.len();
+
+    agent
+        .queue_user_prune(ContextPruneSpec::new(ContextPruneKind::Turns).keep_recent(2))
+        .expect("a user prune request must be accepted");
+    agent.apply_pending_context_actions();
+
+    assert!(matches!(
+        last_outcome(&agent),
+        ContextActionOutcome::Completed { .. }
+    ));
+    let pruned = agent.session.messages.len();
+    assert!(pruned < before, "the user prune must drop old turn groups");
+
+    agent
+        .queue_user_prune_undo()
+        .expect("a user undo request must be accepted");
+    agent.apply_pending_context_actions();
+
+    assert_eq!(
+        agent.session.messages.len(),
+        before,
+        "the user undo must restore the transcript"
+    );
+}

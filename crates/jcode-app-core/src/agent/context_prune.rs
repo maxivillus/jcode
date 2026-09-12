@@ -1,8 +1,8 @@
 use super::Agent;
 use crate::context::ContextRevision;
 use crate::context_controller::{
-    ContextActionOutcome, ContextPruneKind, ContextPruneLevel, ContextPruneProjection,
-    ContextPruneSpec, MAX_PROJECTION_LEVELS,
+    ContextActionKind, ContextActionOutcome, ContextActionRequest, ContextPruneKind,
+    ContextPruneLevel, ContextPruneProjection, ContextPruneSpec, MAX_PROJECTION_LEVELS,
 };
 use crate::message::{ContentBlock, Message, Role};
 use crate::session::StoredMessage;
@@ -454,6 +454,34 @@ impl Agent {
                 "pruned {pruned} item(s); estimated tokens {before_tokens} -> {after_tokens}"
             ),
         }
+    }
+
+    /// Ставит в очередь обрезку по явной команде пользователя.
+    ///
+    /// Опасные для контекста виды (`turns`, `tail`) модель запросить не может:
+    /// их ставит клиент после подтверждённой команды. Заявка, как и у модели,
+    /// применяется на границе turn-а, поэтому транскрипт не меняется во время
+    /// обработки текущего запроса.
+    pub(crate) fn queue_user_prune(
+        &mut self,
+        spec: ContextPruneSpec,
+    ) -> Result<ContextActionRequest, String> {
+        let revision = self.context_revision();
+        self.context_controller
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .request_prune(spec, revision)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Ставит в очередь отмену последней обрезки по команде пользователя.
+    pub(crate) fn queue_user_prune_undo(&mut self) -> Result<ContextActionRequest, String> {
+        let revision = self.context_revision();
+        self.context_controller
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .request_action(ContextActionKind::UndoPrune, revision)
+            .map_err(|error| error.to_string())
     }
 
     /// Возвращает историю и provider-сессию к состоянию до последней обрезки.

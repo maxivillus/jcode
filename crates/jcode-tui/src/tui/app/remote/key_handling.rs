@@ -1102,6 +1102,20 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
+                if let Some(prune) = app_mod::state_ui::parse_context_prune_command(trimmed) {
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "Запрашиваю обрезку контекста ({}) на удалённом server...",
+                        prune.kind
+                    )));
+                    if let Err(error) = remote.context_prune(&prune.kind, prune.keep_recent).await {
+                        app.push_display_message(DisplayMessage::error(format!(
+                            "Не удалось запросить обрезку контекста: {error}"
+                        )));
+                        app.set_status_notice("Обрезка контекста не запрошена");
+                    }
+                    return Ok(());
+                }
+
                 if trimmed == "/context compact" {
                     app.push_display_message(DisplayMessage::system(
                         "Запрашиваю compact удалённого context...".to_string(),

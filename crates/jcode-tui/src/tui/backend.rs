@@ -974,6 +974,19 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Поставить в очередь обрезку контекста по явной команде пользователя.
+    pub async fn context_prune(&mut self, kind: &str, keep_recent: Option<usize>) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        let request = Request::ContextPrune {
+            id,
+            kind: kind.to_string(),
+            keep_recent,
+        };
+        self.send_request(request).await?;
+        Ok(id)
+    }
+
     /// Trigger immediate memory extraction on the server for the active session.
     pub async fn trigger_memory_extraction(&mut self) -> Result<()> {
         let id = self.next_request_id;

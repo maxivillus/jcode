@@ -585,6 +585,7 @@ impl Request {
             Request::Clear { id } => *id,
             Request::Rewind { id, .. } => *id,
             Request::RewindUndo { id } => *id,
+            Request::ContextPrune { id, .. } => *id,
             Request::Ping { id } => *id,
             Request::GetState { id } => *id,
             Request::DebugCommand { id, .. } => *id,
