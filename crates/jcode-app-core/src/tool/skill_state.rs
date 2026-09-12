@@ -2,6 +2,7 @@ use super::{
     Tool, ToolContext, ToolOutput,
     context_control::{ContextControllerBindings, context_controller_for_session},
 };
+use crate::context::ContextPlane;
 use crate::execution_state::{ExecutionStatePatch, PatchValue};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -176,9 +177,11 @@ impl Tool for SkillStateTool {
                 let state = controller.execution_state().clone();
                 json!({
                     "action": "get_state",
+                    "plane": ContextPlane::Execution,
                     "mutated": false,
                     "revision": state.revision,
                     "fingerprint": state.fingerprint(),
+                    "contract": state.contract(),
                     "state": state,
                 })
             }
@@ -192,11 +195,13 @@ impl Tool for SkillStateTool {
                 let state = controller.execution_state().clone();
                 json!({
                     "action": "propose_patch",
+                    "plane": ContextPlane::Execution,
                     "applied": true,
                     "mutated": true,
                     "previous_revision": previous_revision,
                     "revision": revision,
                     "fingerprint": state.fingerprint(),
+                    "contract": state.contract(),
                     "state": state,
                 })
             }
@@ -238,6 +243,7 @@ impl Tool for SkillStateTool {
                 let state = controller.execution_state();
                 json!({
                     "action": "record_observation",
+                    "plane": ContextPlane::Evidence,
                     "applied": true,
                     "mutated": true,
                     "revision": revision,
@@ -249,6 +255,7 @@ impl Tool for SkillStateTool {
                 let evidence: Vec<String> = state.evidence_refs.iter().flatten().cloned().collect();
                 json!({
                     "action": "retrieve_evidence",
+                    "plane": ContextPlane::Evidence,
                     "mutated": false,
                     "revision": state.revision,
                     "source_revision": state.source_revision,
@@ -287,6 +294,7 @@ impl Tool for SkillStateTool {
                 }
                 json!({
                     "action": "reconcile",
+                    "plane": ContextPlane::Execution,
                     "mutated": false,
                     "revision": state.revision,
                     "matches": differences.is_empty(),
@@ -400,8 +408,25 @@ mod tests {
         let metadata = result.metadata.expect("state metadata");
 
         assert_eq!(metadata["mutated"], json!(false));
+        assert_eq!(metadata["plane"], json!("execution"));
         assert_eq!(metadata["revision"], json!(0));
         assert_eq!(metadata["state"]["revision"], json!(0));
+        assert_eq!(metadata["contract"]["state_schema"], json!("default"));
+        for field in [
+            "schema_version",
+            "state_schema",
+            "required_fields",
+            "field_limits",
+            "observation_sources",
+            "allowed_actions",
+            "state_retention_policy",
+            "conflict_policy",
+        ] {
+            assert!(
+                metadata["contract"].get(field).is_some(),
+                "missing contract field {field}"
+            );
+        }
         assert_eq!(
             controller
                 .lock()
@@ -429,6 +454,8 @@ mod tests {
         assert_eq!(metadata["applied"], json!(true));
         assert_eq!(metadata["previous_revision"], json!(0));
         assert_eq!(metadata["revision"], json!(1));
+        assert_eq!(metadata["plane"], json!("execution"));
+        assert_eq!(metadata["contract"]["state_schema"], json!("default"));
         assert_eq!(metadata["state"]["goal"], json!("bounded goal"));
         assert_eq!(
             controller
@@ -533,6 +560,7 @@ mod tests {
         let metadata = result.metadata.expect("metadata");
 
         assert_eq!(metadata["mutated"], json!(true));
+        assert_eq!(metadata["plane"], json!("evidence"));
         assert_eq!(metadata["revision"], json!(1));
         assert_eq!(metadata["evidence_count"], json!(1));
         let controller = controller.lock().expect("controller lock");
@@ -599,6 +627,7 @@ mod tests {
         let metadata = result.metadata.expect("metadata");
 
         assert_eq!(metadata["mutated"], json!(false));
+        assert_eq!(metadata["plane"], json!("evidence"));
         assert_eq!(metadata["source_revision"], json!("abc123"));
         assert_eq!(metadata["evidence_refs"], json!(["file:line"]));
         assert_eq!(
@@ -636,6 +665,7 @@ mod tests {
             .await
             .expect("reconcile should succeed");
         let metadata = result.metadata.expect("metadata");
+        assert_eq!(metadata["plane"], json!("execution"));
         assert_eq!(metadata["matches"], json!(false));
         assert_eq!(metadata["mutated"], json!(false));
         let differences = metadata["differences"].as_array().expect("differences");

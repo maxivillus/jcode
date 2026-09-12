@@ -1,5 +1,5 @@
 use super::{Tool, ToolContext, ToolOutput, skill_state};
-use crate::context::ContextRevision;
+use crate::context::{ContextPlane, ContextRevision};
 use crate::context_controller::{
     ContextActionKind, ContextController, ContextPruneForecast, ContextPruneKind,
     ContextPruneProjection, ContextPruneSpec, ContextRequestOrigin,
@@ -128,12 +128,14 @@ fn default_action() -> String {
 fn context_metadata(controller: &ContextController) -> Value {
     let manifest = controller.manifest();
     json!({
+        "plane": ContextPlane::Conversation,
         "schema_version": manifest.schema_version,
         "revision": manifest.revision,
         "provider_generation": manifest.provider_generation,
         "estimated_input_tokens": manifest.estimated_input_tokens,
         "observed_input_tokens": manifest.observed_input_tokens,
         "components": &manifest.components,
+        "component_states": &manifest.component_states,
         "fingerprint": manifest.fingerprint(),
     })
 }
@@ -157,9 +159,11 @@ fn preflight_metadata(controller: &ContextController) -> Value {
 fn execution_state_metadata(controller: &ContextController) -> Value {
     let state = controller.execution_state();
     json!({
+        "plane": ContextPlane::Execution,
         "state_schema": state.state_schema,
         "schema_version": state.schema_version,
         "revision": state.revision,
+        "contract": state.contract(),
     })
 }
 

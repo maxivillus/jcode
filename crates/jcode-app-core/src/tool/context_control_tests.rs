@@ -167,6 +167,11 @@ async fn status_is_read_only_and_reports_bounded_metadata() {
 
     assert_eq!(metadata["mutated"], json!(false));
     assert_eq!(metadata["context"]["revision"], json!(0));
+    assert_eq!(metadata["context"]["plane"], json!("conversation"));
+    assert_eq!(
+        metadata["context"]["component_states"]["system_prompt"],
+        json!("unknown")
+    );
     assert_eq!(metadata["preflight"]["status"], json!("not_available"));
     assert!(
         metadata["projection"].is_null(),
@@ -704,6 +709,10 @@ async fn export_writes_a_private_redacted_file() {
         document["context"]["components"].is_object(),
         "the manifest keeps component hashes: {document}"
     );
+    assert_eq!(document["context"]["plane"], json!("conversation"));
+    assert!(document["context"]["component_states"].is_object());
+    assert_eq!(document["execution_state"]["plane"], json!("execution"));
+    assert!(document["execution_state"]["contract"].is_object());
     assert!(document["prune"].is_array());
 
     let mode = std::fs::metadata(path)
@@ -834,6 +843,25 @@ async fn export_returns_redacted_manifest_without_file() {
     assert_eq!(metadata["manifest"]["revision"], json!(1));
     assert_eq!(metadata["manifest"]["provider_generation"], json!(11));
     assert!(metadata["manifest"]["fingerprint"].is_string());
+    assert_eq!(metadata["manifest"]["plane"], json!("conversation"));
+    assert!(metadata["manifest"]["component_states"].is_object());
+    assert_eq!(metadata["execution_state"]["plane"], json!("execution"));
+    let contract = &metadata["execution_state"]["contract"];
+    for field in [
+        "schema_version",
+        "state_schema",
+        "required_fields",
+        "field_limits",
+        "observation_sources",
+        "allowed_actions",
+        "state_retention_policy",
+        "conflict_policy",
+    ] {
+        assert!(
+            contract.get(field).is_some(),
+            "missing contract field {field}"
+        );
+    }
     assert_eq!(
         metadata["actions"]["last"]["outcome"]["status"],
         json!("skipped")
