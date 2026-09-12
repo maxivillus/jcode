@@ -6,6 +6,7 @@
 //! значением `null` очищают соответствующее поле состояния.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
 use std::fmt;
 
 pub const EXECUTION_STATE_SCHEMA_VERSION: u32 = 1;
@@ -13,6 +14,53 @@ pub const EXECUTION_STATE_PATCH_SCHEMA_VERSION: u32 = 1;
 pub const MAX_EXECUTION_STATE_SCHEMA_CHARS: usize = 128;
 pub const MAX_EXECUTION_STATE_TEXT_CHARS: usize = 512;
 pub const MAX_EXECUTION_STATE_LIST_ITEMS: usize = 128;
+
+const EXECUTION_STATE_ALLOWED_ACTIONS: [&str; 5] = [
+    "get_state",
+    "propose_patch",
+    "record_observation",
+    "retrieve_evidence",
+    "reconcile",
+];
+const EXECUTION_STATE_TEXT_FIELDS: [&str; 7] = [
+    "state_schema",
+    "goal",
+    "phase",
+    "next_action",
+    "source_revision",
+    "owner",
+    "lease",
+];
+const EXECUTION_STATE_LIST_FIELDS: [&str; 8] = [
+    "acceptance_criteria",
+    "completed",
+    "pending",
+    "decisions",
+    "changed_files",
+    "tests",
+    "blockers",
+    "evidence_refs",
+];
+const EXECUTION_STATE_NUMERIC_FIELDS: [&str; 2] = ["schema_version", "revision"];
+const EXECUTION_STATE_FIELDS: [&str; 17] = [
+    "schema_version",
+    "state_schema",
+    "revision",
+    "goal",
+    "acceptance_criteria",
+    "phase",
+    "completed",
+    "pending",
+    "decisions",
+    "changed_files",
+    "tests",
+    "blockers",
+    "next_action",
+    "source_revision",
+    "evidence_refs",
+    "owner",
+    "lease",
+];
 
 /// Revision структурированного состояния skill-run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -62,6 +110,154 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for PatchValue<T> {
 /// а `Some(Set(value))` устанавливает новое значение.
 pub type OptionalPatch<T> = Option<PatchValue<T>>;
 
+/// Ограничения одного поля в machine-readable contract состояния.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionStateFieldLimit {
+    #[serde(default)]
+    pub max_chars: Option<usize>,
+    #[serde(default)]
+    pub max_items: Option<usize>,
+    #[serde(default)]
+    pub max_item_chars: Option<usize>,
+}
+
+impl ExecutionStateFieldLimit {
+    fn text(max_chars: usize) -> Self {
+        Self {
+            max_chars: Some(max_chars),
+            max_items: None,
+            max_item_chars: None,
+        }
+    }
+
+    fn list(max_items: usize, max_item_chars: usize) -> Self {
+        Self {
+            max_chars: None,
+            max_items: Some(max_items),
+            max_item_chars: Some(max_item_chars),
+        }
+    }
+}
+
+/// Полный machine-readable contract для `ExecutionState`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionStateContract {
+    #[serde(default = "default_state_schema_version")]
+    pub schema_version: u32,
+    #[serde(default = "default_state_schema")]
+    pub state_schema: String,
+    #[serde(default)]
+    pub required_fields: Vec<String>,
+    #[serde(default = "default_field_limits")]
+    pub field_limits: BTreeMap<String, ExecutionStateFieldLimit>,
+    #[serde(default)]
+    pub observation_sources: Vec<String>,
+    #[serde(default = "default_allowed_actions")]
+    pub allowed_actions: Vec<String>,
+    #[serde(default = "default_state_retention_policy")]
+    pub state_retention_policy: String,
+    #[serde(default = "default_conflict_policy")]
+    pub conflict_policy: String,
+}
+
+impl Default for ExecutionStateContract {
+    fn default() -> Self {
+        Self::new(default_state_schema())
+    }
+}
+
+impl ExecutionStateContract {
+    /// Создаёт contract для указанного state schema с поддерживаемыми runtime
+    /// ограничениями и действиями.
+    pub fn new(state_schema: impl Into<String>) -> Self {
+        Self {
+            schema_version: EXECUTION_STATE_SCHEMA_VERSION,
+            state_schema: state_schema.into(),
+            required_fields: Vec::new(),
+            field_limits: default_field_limits(),
+            observation_sources: Vec::new(),
+            allowed_actions: default_allowed_actions(),
+            state_retention_policy: default_state_retention_policy(),
+            conflict_policy: default_conflict_policy(),
+        }
+    }
+
+    /// Проверяет сам contract до его использования как описания состояния.
+    pub fn validate(&self) -> Result<(), ExecutionStateError> {
+        if self.schema_version != EXECUTION_STATE_SCHEMA_VERSION {
+            return Err(ExecutionStateError::UnsupportedStateSchemaVersion {
+                expected: EXECUTION_STATE_SCHEMA_VERSION,
+                actual: self.schema_version,
+            });
+        }
+
+        validate_text(
+            "state_schema",
+            &self.state_schema,
+            MAX_EXECUTION_STATE_SCHEMA_CHARS,
+        )?;
+        validate_list_with_limits(
+            "required_fields",
+            &self.required_fields,
+            MAX_EXECUTION_STATE_LIST_ITEMS,
+            MAX_EXECUTION_STATE_SCHEMA_CHARS,
+        )?;
+        for field in &self.required_fields {
+            if !EXECUTION_STATE_FIELDS.contains(&field.as_str()) {
+                return Err(ExecutionStateError::UnknownContractField {
+                    field: field.clone(),
+                });
+            }
+        }
+
+        if self.field_limits.len() > MAX_EXECUTION_STATE_LIST_ITEMS {
+            return Err(ExecutionStateError::TooManyItems {
+                field: "field_limits",
+                max_items: MAX_EXECUTION_STATE_LIST_ITEMS,
+                actual_items: self.field_limits.len(),
+            });
+        }
+        for (field, limit) in &self.field_limits {
+            validate_text("field_limits", field, MAX_EXECUTION_STATE_SCHEMA_CHARS)?;
+            if !EXECUTION_STATE_FIELDS.contains(&field.as_str()) {
+                return Err(ExecutionStateError::UnknownContractField {
+                    field: field.clone(),
+                });
+            }
+            validate_field_limit(field, limit)?;
+        }
+        for field in EXECUTION_STATE_FIELDS {
+            if !self.field_limits.contains_key(field) {
+                return Err(ExecutionStateError::MissingFieldLimit { field });
+            }
+        }
+
+        validate_list_with_limits(
+            "observation_sources",
+            &self.observation_sources,
+            MAX_EXECUTION_STATE_LIST_ITEMS,
+            MAX_EXECUTION_STATE_TEXT_CHARS,
+        )?;
+        validate_list_with_limits(
+            "allowed_actions",
+            &self.allowed_actions,
+            MAX_EXECUTION_STATE_LIST_ITEMS,
+            MAX_EXECUTION_STATE_TEXT_CHARS,
+        )?;
+        validate_text(
+            "state_retention_policy",
+            &self.state_retention_policy,
+            MAX_EXECUTION_STATE_TEXT_CHARS,
+        )?;
+        validate_text(
+            "conflict_policy",
+            &self.conflict_policy,
+            MAX_EXECUTION_STATE_TEXT_CHARS,
+        )?;
+        Ok(())
+    }
+}
+
 /// Ограниченное состояние текущего procedural skill-run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionState {
@@ -71,6 +267,18 @@ pub struct ExecutionState {
     pub state_schema: String,
     #[serde(default)]
     pub revision: ExecutionStateRevision,
+    #[serde(default)]
+    pub required_fields: Vec<String>,
+    #[serde(default = "default_field_limits")]
+    pub field_limits: BTreeMap<String, ExecutionStateFieldLimit>,
+    #[serde(default)]
+    pub observation_sources: Vec<String>,
+    #[serde(default = "default_allowed_actions")]
+    pub allowed_actions: Vec<String>,
+    #[serde(default = "default_state_retention_policy")]
+    pub state_retention_policy: String,
+    #[serde(default = "default_conflict_policy")]
+    pub conflict_policy: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -103,10 +311,17 @@ pub struct ExecutionState {
 
 impl Default for ExecutionState {
     fn default() -> Self {
+        let contract = ExecutionStateContract::default();
         Self {
-            schema_version: EXECUTION_STATE_SCHEMA_VERSION,
-            state_schema: default_state_schema(),
+            schema_version: contract.schema_version,
+            state_schema: contract.state_schema,
             revision: ExecutionStateRevision::INITIAL,
+            required_fields: contract.required_fields,
+            field_limits: contract.field_limits,
+            observation_sources: contract.observation_sources,
+            allowed_actions: contract.allowed_actions,
+            state_retention_policy: contract.state_retention_policy,
+            conflict_policy: contract.conflict_policy,
             goal: None,
             acceptance_criteria: None,
             phase: None,
@@ -136,6 +351,20 @@ impl ExecutionState {
         Ok(state)
     }
 
+    /// Возвращает полный machine-readable contract текущего state.
+    pub fn contract(&self) -> ExecutionStateContract {
+        ExecutionStateContract {
+            schema_version: self.schema_version,
+            state_schema: self.state_schema.clone(),
+            required_fields: self.required_fields.clone(),
+            field_limits: self.field_limits.clone(),
+            observation_sources: self.observation_sources.clone(),
+            allowed_actions: self.allowed_actions.clone(),
+            state_retention_policy: self.state_retention_policy.clone(),
+            conflict_policy: self.conflict_policy.clone(),
+        }
+    }
+
     /// Проверяет границы state перед сохранением или передачей модели.
     pub fn validate(&self) -> Result<(), ExecutionStateError> {
         if self.schema_version != EXECUTION_STATE_SCHEMA_VERSION {
@@ -145,25 +374,110 @@ impl ExecutionState {
             });
         }
 
+        let contract = self.contract();
+        contract.validate()?;
+
         validate_text(
             "state_schema",
             &self.state_schema,
-            MAX_EXECUTION_STATE_SCHEMA_CHARS,
+            self.text_limit("state_schema", MAX_EXECUTION_STATE_SCHEMA_CHARS),
         )?;
-        validate_optional_text("goal", &self.goal)?;
-        validate_optional_list("acceptance_criteria", &self.acceptance_criteria)?;
-        validate_optional_text("phase", &self.phase)?;
-        validate_optional_list("completed", &self.completed)?;
-        validate_optional_list("pending", &self.pending)?;
-        validate_optional_list("decisions", &self.decisions)?;
-        validate_optional_list("changed_files", &self.changed_files)?;
-        validate_optional_list("tests", &self.tests)?;
-        validate_optional_list("blockers", &self.blockers)?;
-        validate_optional_text("next_action", &self.next_action)?;
-        validate_optional_text("source_revision", &self.source_revision)?;
-        validate_optional_list("evidence_refs", &self.evidence_refs)?;
-        validate_optional_text("owner", &self.owner)?;
-        validate_optional_text("lease", &self.lease)?;
+        self.validate_required_fields()?;
+        self.validate_optional_text("goal", &self.goal)?;
+        self.validate_optional_list("acceptance_criteria", &self.acceptance_criteria)?;
+        self.validate_optional_text("phase", &self.phase)?;
+        self.validate_optional_list("completed", &self.completed)?;
+        self.validate_optional_list("pending", &self.pending)?;
+        self.validate_optional_list("decisions", &self.decisions)?;
+        self.validate_optional_list("changed_files", &self.changed_files)?;
+        self.validate_optional_list("tests", &self.tests)?;
+        self.validate_optional_list("blockers", &self.blockers)?;
+        self.validate_optional_text("next_action", &self.next_action)?;
+        self.validate_optional_text("source_revision", &self.source_revision)?;
+        self.validate_optional_list("evidence_refs", &self.evidence_refs)?;
+        self.validate_optional_text("owner", &self.owner)?;
+        self.validate_optional_text("lease", &self.lease)?;
+        Ok(())
+    }
+
+    fn text_limit(&self, field: &'static str, fallback: usize) -> usize {
+        self.field_limits
+            .get(field)
+            .and_then(|limit| limit.max_chars)
+            .unwrap_or(fallback)
+    }
+
+    fn list_limits(&self, field: &'static str) -> (usize, usize) {
+        self.field_limits
+            .get(field)
+            .map(|limit| {
+                (
+                    limit.max_items.unwrap_or(MAX_EXECUTION_STATE_LIST_ITEMS),
+                    limit
+                        .max_item_chars
+                        .unwrap_or(MAX_EXECUTION_STATE_TEXT_CHARS),
+                )
+            })
+            .unwrap_or((
+                MAX_EXECUTION_STATE_LIST_ITEMS,
+                MAX_EXECUTION_STATE_TEXT_CHARS,
+            ))
+    }
+
+    fn validate_optional_text(
+        &self,
+        field: &'static str,
+        value: &Option<String>,
+    ) -> Result<(), ExecutionStateError> {
+        if let Some(value) = value {
+            validate_text(
+                field,
+                value,
+                self.text_limit(field, MAX_EXECUTION_STATE_TEXT_CHARS),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_optional_list(
+        &self,
+        field: &'static str,
+        value: &Option<Vec<String>>,
+    ) -> Result<(), ExecutionStateError> {
+        if let Some(value) = value {
+            let (max_items, max_item_chars) = self.list_limits(field);
+            validate_list_with_limits(field, value, max_items, max_item_chars)?;
+        }
+        Ok(())
+    }
+
+    fn validate_required_fields(&self) -> Result<(), ExecutionStateError> {
+        for field in &self.required_fields {
+            let present = match field.as_str() {
+                "schema_version" | "revision" => true,
+                "state_schema" => !self.state_schema.is_empty(),
+                "goal" => self.goal.is_some(),
+                "acceptance_criteria" => self.acceptance_criteria.is_some(),
+                "phase" => self.phase.is_some(),
+                "completed" => self.completed.is_some(),
+                "pending" => self.pending.is_some(),
+                "decisions" => self.decisions.is_some(),
+                "changed_files" => self.changed_files.is_some(),
+                "tests" => self.tests.is_some(),
+                "blockers" => self.blockers.is_some(),
+                "next_action" => self.next_action.is_some(),
+                "source_revision" => self.source_revision.is_some(),
+                "evidence_refs" => self.evidence_refs.is_some(),
+                "owner" => self.owner.is_some(),
+                "lease" => self.lease.is_some(),
+                _ => false,
+            };
+            if !present {
+                return Err(ExecutionStateError::RequiredFieldMissing {
+                    field: field.clone(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -443,6 +757,18 @@ pub enum ExecutionStateError {
         max_chars: usize,
         actual_chars: usize,
     },
+    UnknownContractField {
+        field: String,
+    },
+    MissingFieldLimit {
+        field: &'static str,
+    },
+    InvalidFieldLimit {
+        field: String,
+    },
+    RequiredFieldMissing {
+        field: String,
+    },
     StateSchemaMismatch {
         expected: String,
         actual: String,
@@ -494,6 +820,24 @@ impl fmt::Display for ExecutionStateError {
                 formatter,
                 "execution state field {field}[{index}] has {actual_chars} characters, maximum is {max_chars}"
             ),
+            Self::UnknownContractField { field } => {
+                write!(
+                    formatter,
+                    "execution state contract has unknown field {field}"
+                )
+            }
+            Self::MissingFieldLimit { field } => write!(
+                formatter,
+                "execution state contract has no limit for field {field}"
+            ),
+            Self::InvalidFieldLimit { field } => write!(
+                formatter,
+                "execution state contract has invalid limits for field {field}"
+            ),
+            Self::RequiredFieldMissing { field } => write!(
+                formatter,
+                "execution state required field {field} is missing"
+            ),
             Self::StateSchemaMismatch { expected, actual } => write!(
                 formatter,
                 "execution state schema mismatch: patch has {actual}, state has {expected}"
@@ -519,14 +863,92 @@ fn default_state_schema() -> String {
     "default".to_string()
 }
 
-fn validate_optional_text(
-    field: &'static str,
-    value: &Option<String>,
-) -> Result<(), ExecutionStateError> {
-    if let Some(value) = value {
-        validate_text(field, value, MAX_EXECUTION_STATE_TEXT_CHARS)?;
+fn default_field_limits() -> BTreeMap<String, ExecutionStateFieldLimit> {
+    let mut limits = BTreeMap::new();
+    for field in EXECUTION_STATE_NUMERIC_FIELDS {
+        limits.insert(field.to_string(), ExecutionStateFieldLimit::default());
     }
-    Ok(())
+    limits.insert(
+        "state_schema".to_string(),
+        ExecutionStateFieldLimit::text(MAX_EXECUTION_STATE_SCHEMA_CHARS),
+    );
+    for field in [
+        "goal",
+        "phase",
+        "next_action",
+        "source_revision",
+        "owner",
+        "lease",
+    ] {
+        limits.insert(
+            field.to_string(),
+            ExecutionStateFieldLimit::text(MAX_EXECUTION_STATE_TEXT_CHARS),
+        );
+    }
+    for field in EXECUTION_STATE_LIST_FIELDS {
+        limits.insert(
+            field.to_string(),
+            ExecutionStateFieldLimit::list(
+                MAX_EXECUTION_STATE_LIST_ITEMS,
+                MAX_EXECUTION_STATE_TEXT_CHARS,
+            ),
+        );
+    }
+    limits
+}
+
+fn default_allowed_actions() -> Vec<String> {
+    EXECUTION_STATE_ALLOWED_ACTIONS
+        .iter()
+        .map(|action| (*action).to_string())
+        .collect()
+}
+
+fn default_state_retention_policy() -> String {
+    "retain_until_session_end".to_string()
+}
+
+fn default_conflict_policy() -> String {
+    "reject_stale_revision".to_string()
+}
+
+fn validate_field_limit(
+    field: &str,
+    limit: &ExecutionStateFieldLimit,
+) -> Result<(), ExecutionStateError> {
+    let valid = if EXECUTION_STATE_NUMERIC_FIELDS.contains(&field) {
+        limit.max_chars.is_none() && limit.max_items.is_none() && limit.max_item_chars.is_none()
+    } else if field == "state_schema" {
+        limit
+            .max_chars
+            .is_some_and(|value| value > 0 && value <= MAX_EXECUTION_STATE_SCHEMA_CHARS)
+            && limit.max_items.is_none()
+            && limit.max_item_chars.is_none()
+    } else if EXECUTION_STATE_TEXT_FIELDS.contains(&field) {
+        limit
+            .max_chars
+            .is_some_and(|value| value > 0 && value <= MAX_EXECUTION_STATE_TEXT_CHARS)
+            && limit.max_items.is_none()
+            && limit.max_item_chars.is_none()
+    } else if EXECUTION_STATE_LIST_FIELDS.contains(&field) {
+        limit.max_chars.is_none()
+            && limit
+                .max_items
+                .is_some_and(|value| value > 0 && value <= MAX_EXECUTION_STATE_LIST_ITEMS)
+            && limit
+                .max_item_chars
+                .is_some_and(|value| value > 0 && value <= MAX_EXECUTION_STATE_TEXT_CHARS)
+    } else {
+        false
+    };
+
+    if valid {
+        Ok(())
+    } else {
+        Err(ExecutionStateError::InvalidFieldLimit {
+            field: field.to_string(),
+        })
+    }
 }
 
 fn validate_patch_text(
@@ -569,16 +991,6 @@ fn validate_text(
     Ok(())
 }
 
-fn validate_optional_list(
-    field: &'static str,
-    value: &Option<Vec<String>>,
-) -> Result<(), ExecutionStateError> {
-    if let Some(value) = value {
-        validate_list(field, value)?;
-    }
-    Ok(())
-}
-
 fn validate_patch_list<T: AsRef<str>>(
     field: &'static str,
     value: &OptionalPatch<Vec<T>>,
@@ -593,10 +1005,24 @@ fn validate_list<T: AsRef<str>>(
     field: &'static str,
     values: &[T],
 ) -> Result<(), ExecutionStateError> {
-    if values.len() > MAX_EXECUTION_STATE_LIST_ITEMS {
+    validate_list_with_limits(
+        field,
+        values,
+        MAX_EXECUTION_STATE_LIST_ITEMS,
+        MAX_EXECUTION_STATE_TEXT_CHARS,
+    )
+}
+
+fn validate_list_with_limits<T: AsRef<str>>(
+    field: &'static str,
+    values: &[T],
+    max_items: usize,
+    max_item_chars: usize,
+) -> Result<(), ExecutionStateError> {
+    if values.len() > max_items {
         return Err(ExecutionStateError::TooManyItems {
             field,
-            max_items: MAX_EXECUTION_STATE_LIST_ITEMS,
+            max_items,
             actual_items: values.len(),
         });
     }
@@ -607,11 +1033,11 @@ fn validate_list<T: AsRef<str>>(
             return Err(ExecutionStateError::EmptyField { field });
         }
         let actual_chars = value.chars().count();
-        if actual_chars > MAX_EXECUTION_STATE_TEXT_CHARS {
+        if actual_chars > max_item_chars {
             return Err(ExecutionStateError::ItemTooLong {
                 field,
                 index,
-                max_chars: MAX_EXECUTION_STATE_TEXT_CHARS,
+                max_chars: max_item_chars,
                 actual_chars,
             });
         }
@@ -636,181 +1062,5 @@ fn apply_list_patch(target: &mut Option<Vec<String>>, patch: &OptionalPatch<Vec<
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn new_state_has_default_schema_and_revision() {
-        let state = ExecutionState::new("code-review").unwrap();
-
-        assert_eq!(state.schema_version, EXECUTION_STATE_SCHEMA_VERSION);
-        assert_eq!(state.state_schema, "code-review");
-        assert_eq!(state.revision, ExecutionStateRevision::INITIAL);
-        assert!(state.validate().is_ok());
-    }
-
-    #[test]
-    fn patch_updates_fields_and_advances_revision() {
-        let mut state = ExecutionState::new("code-review").unwrap();
-        let mut patch = ExecutionStatePatch::new("code-review", state.revision);
-        patch.goal = Some(PatchValue::Set("Review the current diff".to_string()));
-        patch.pending = Some(PatchValue::Set(vec!["Inspect changed files".to_string()]));
-        patch.next_action = Some(PatchValue::Set("Run focused tests".to_string()));
-
-        state.apply_patch(&patch).unwrap();
-
-        assert_eq!(state.revision, ExecutionStateRevision(1));
-        assert_eq!(state.goal.as_deref(), Some("Review the current diff"));
-        assert_eq!(
-            state.pending,
-            Some(vec!["Inspect changed files".to_string()])
-        );
-        assert_eq!(state.next_action.as_deref(), Some("Run focused tests"));
-    }
-
-    #[test]
-    fn json_null_clears_a_field() {
-        let mut state = ExecutionState::new("code-review").unwrap();
-        state.goal = Some("Old goal".to_string());
-        let patch_json = r#"
-        {
-            "patch_schema_version": 1,
-            "state_schema": "code-review",
-            "expected_revision": 0,
-            "goal": null
-        }
-        "#;
-        let patch: ExecutionStatePatch = serde_json::from_str(patch_json).unwrap();
-
-        assert_eq!(patch.goal, Some(PatchValue::Clear));
-
-        state.apply_patch(&patch).unwrap();
-
-        assert_eq!(state.goal, None);
-        assert_eq!(state.revision, ExecutionStateRevision(1));
-    }
-
-    #[test]
-    fn patch_serialization_preserves_omitted_and_clear_fields() {
-        let mut patch = ExecutionStatePatch::new("code-review", ExecutionStateRevision(3));
-        patch.goal = Some(PatchValue::Clear);
-        patch.phase = Some(PatchValue::Set("review".to_string()));
-
-        let encoded = serde_json::to_value(&patch).unwrap();
-        let object = encoded.as_object().unwrap();
-        assert_eq!(object.get("goal"), Some(&serde_json::Value::Null));
-        assert_eq!(
-            object.get("phase").and_then(|value| value.as_str()),
-            Some("review")
-        );
-        assert!(!object.contains_key("pending"));
-
-        let decoded: ExecutionStatePatch = serde_json::from_value(encoded).unwrap();
-        assert_eq!(decoded.goal, Some(PatchValue::Clear));
-        assert_eq!(decoded.phase, Some(PatchValue::Set("review".to_string())));
-        assert_eq!(decoded.pending, None);
-    }
-
-    #[test]
-    fn unknown_patch_fields_are_rejected() {
-        let patch_json = r#"
-        {
-            "patch_schema_version": 1,
-            "state_schema": "code-review",
-            "expected_revision": 0,
-            "goal": "Review",
-            "unexpected": true
-        }
-        "#;
-
-        let error = serde_json::from_str::<ExecutionStatePatch>(patch_json).unwrap_err();
-
-        assert!(error.to_string().contains("unknown field"));
-    }
-
-    #[test]
-    fn stale_patch_is_rejected_without_mutating_state() {
-        let mut state = ExecutionState::new("code-review").unwrap();
-        state.goal = Some("Current goal".to_string());
-        let before = state.clone();
-        let mut patch = ExecutionStatePatch::new("code-review", ExecutionStateRevision(4));
-        patch.goal = Some(PatchValue::Set("Stale goal".to_string()));
-
-        let error = state.apply_patch(&patch).unwrap_err();
-
-        assert_eq!(
-            error,
-            ExecutionStateError::RevisionMismatch {
-                expected: ExecutionStateRevision(4),
-                actual: ExecutionStateRevision::INITIAL,
-            }
-        );
-        assert_eq!(state, before);
-    }
-
-    #[test]
-    fn schema_mismatch_is_rejected() {
-        let mut state = ExecutionState::new("code-review").unwrap();
-        let mut patch = ExecutionStatePatch::new("release-plan", state.revision);
-        patch.phase = Some(PatchValue::Set("review".to_string()));
-
-        let error = state.apply_patch(&patch).unwrap_err();
-
-        assert_eq!(
-            error,
-            ExecutionStateError::StateSchemaMismatch {
-                expected: "code-review".to_string(),
-                actual: "release-plan".to_string(),
-            }
-        );
-        assert_eq!(state.revision, ExecutionStateRevision::INITIAL);
-    }
-
-    #[test]
-    fn invalid_bounds_are_rejected() {
-        let mut state = ExecutionState::new("code-review").unwrap();
-        let mut patch = ExecutionStatePatch::new("code-review", state.revision);
-        patch.goal = Some(PatchValue::Set(
-            "x".repeat(MAX_EXECUTION_STATE_TEXT_CHARS + 1),
-        ));
-
-        assert!(matches!(
-            state.apply_patch(&patch),
-            Err(ExecutionStateError::FieldTooLong { field: "goal", .. })
-        ));
-    }
-
-    #[test]
-    fn empty_patch_is_rejected() {
-        let mut state = ExecutionState::new("code-review").unwrap();
-        let patch = ExecutionStatePatch::new("code-review", state.revision);
-
-        assert_eq!(
-            state.apply_patch(&patch),
-            Err(ExecutionStateError::EmptyPatch)
-        );
-    }
-
-    #[test]
-    fn revision_exhaustion_is_rejected() {
-        let mut state = ExecutionState::new("code-review").unwrap();
-        state.revision = ExecutionStateRevision(u64::MAX);
-        let mut patch = ExecutionStatePatch::new("code-review", state.revision);
-        patch.phase = Some(PatchValue::Set("done".to_string()));
-
-        assert_eq!(
-            state.apply_patch(&patch),
-            Err(ExecutionStateError::RevisionExhausted)
-        );
-    }
-
-    #[test]
-    fn fingerprint_is_deterministic_and_changes_with_state() {
-        let mut first = ExecutionState::new("code-review").unwrap();
-        let second = first.clone();
-        assert_eq!(first.fingerprint(), second.fingerprint());
-
-        first.goal = Some("changed".to_string());
-        assert_ne!(first.fingerprint(), second.fingerprint());
-    }
-}
+#[path = "execution_state_tests.rs"]
+mod tests;
