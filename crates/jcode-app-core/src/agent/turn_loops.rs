@@ -160,6 +160,9 @@ impl Agent {
             }
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.last_status_detail = None;
+            if !self.final_provider_revision_gate(context_revision) {
+                continue;
+            }
             let mut stream = match self
                 .provider
                 .complete_split(

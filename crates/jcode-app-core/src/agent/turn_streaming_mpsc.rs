@@ -243,18 +243,9 @@ impl Agent {
             let model_at_request_start = provider.model().to_string();
             let resume_session_id = self.provider_session_id.clone();
             self.last_status_detail = None;
-            let _ = event_tx.send(kv_cache_request_event(
-                &cache_signature_messages,
-                &tools,
-                &split_prompt.static_part,
-                &ephemeral_signature_messages,
-            ));
-            // These vectors are only needed to build the cache telemetry event.
-            // Explicitly release their deeply cloned transcript strings before
-            // waiting for the provider stream.
-            drop(cache_signature_messages);
-            drop(ephemeral_signature_messages);
-            let mut keepalive = stream_keepalive_ticker();
+            if !self.final_provider_revision_gate(context_revision) {
+                continue;
+            }
             let mut stream = {
                 let mut complete_future = std::pin::pin!(provider.complete_split(
                     send_messages,
@@ -263,6 +254,18 @@ impl Agent {
                     &split_prompt.dynamic_part,
                     resume_session_id.as_deref(),
                 ));
+                let _ = event_tx.send(kv_cache_request_event(
+                    &cache_signature_messages,
+                    &tools,
+                    &split_prompt.static_part,
+                    &ephemeral_signature_messages,
+                ));
+                // These vectors are only needed to build the cache telemetry event.
+                // Explicitly release their deeply cloned transcript strings before
+                // waiting for the provider stream.
+                drop(cache_signature_messages);
+                drop(ephemeral_signature_messages);
+                let mut keepalive = stream_keepalive_ticker();
                 loop {
                     tokio::select! {
                         _ = keepalive.tick() => {

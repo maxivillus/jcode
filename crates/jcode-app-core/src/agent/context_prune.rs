@@ -9,8 +9,7 @@ use crate::message::{ContentBlock, Message, Role};
 use crate::session::StoredMessage;
 use crate::tool_pairing::{balanced_prefix_ends, balanced_suffix_start, first_gap};
 
-/// Начало сообщения memory-инъекции, как его собирает `memory_injection_message`.
-const MEMORY_INJECTION_MARKER: &str = "<system-reminder>\n# Memory\n";
+use super::context_control::MEMORY_INJECTION_MARKER;
 /// Тег системного напоминания харнесса.
 const SYSTEM_REMINDER_PREFIX: &str = "<system-reminder>";
 /// Заметка, которой заменяется удалённое изображение.

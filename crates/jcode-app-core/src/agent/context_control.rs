@@ -3,7 +3,7 @@ use crate::context::{ContextBudget, ContextComponentHashes, ContextRevision, sha
 use crate::context_controller::{
     ContextActionKind, ContextActionOutcome, ContextActionRequest, ContextPreflightPlan,
 };
-use crate::message::{ContentBlock, Message, ToolDefinition};
+use crate::message::{ContentBlock, Message, Role, ToolDefinition};
 use crate::prompt::SplitSystemPrompt;
 use crate::session::StoredMessage;
 use crate::skill_runtime::SkillRuntimeRegistry;
@@ -13,6 +13,9 @@ const RESERVED_OUTPUT_TOKENS: usize = 4096;
 const SAFETY_MARGIN_TOKENS: usize = 512;
 const IMAGE_TOKEN_ESTIMATE: usize = 256;
 const OPAQUE_NATIVE_ITEM_TOKEN_ESTIMATE: usize = 64;
+
+/// Начало сообщения memory-инъекции, как его собирает memory runtime.
+pub(super) const MEMORY_INJECTION_MARKER: &str = "<system-reminder>\n# Memory\n";
 
 fn serialized_fingerprint<T: Serialize + ?Sized>(value: &T) -> String {
     match serde_json::to_vec(value) {
@@ -26,6 +29,41 @@ fn serialized_token_estimate<T: Serialize + ?Sized>(value: &T) -> usize {
         Ok(encoded) => crate::util::estimate_tokens(&encoded),
         Err(_) => usize::MAX,
     }
+}
+
+fn selected_block_fingerprint(
+    messages: &[Message],
+    mut include: impl FnMut(&Message, &ContentBlock) -> bool,
+) -> String {
+    let selected = messages
+        .iter()
+        .flat_map(|message| message.content.iter().map(move |block| (message, block)))
+        .filter(|(message, block)| include(message, block))
+        .map(|(_, block)| block)
+        .collect::<Vec<_>>();
+    serialized_fingerprint(&selected)
+}
+
+fn memory_fingerprint(messages: &[Message]) -> String {
+    selected_block_fingerprint(messages, |message, block| {
+        message.role == Role::User
+            && matches!(
+                block,
+                ContentBlock::Text { text, .. } if text.starts_with(MEMORY_INJECTION_MARKER)
+            )
+    })
+}
+
+fn image_fingerprint(messages: &[Message]) -> String {
+    selected_block_fingerprint(messages, |_, block| {
+        matches!(block, ContentBlock::Image { .. })
+    })
+}
+
+fn tool_result_fingerprint(messages: &[Message]) -> String {
+    selected_block_fingerprint(messages, |_, block| {
+        matches!(block, ContentBlock::ToolResult { .. })
+    })
 }
 
 /// Оценка токенов одного блока provider-запроса.
@@ -187,9 +225,11 @@ impl Agent {
             system_prompt: Some(sha256_hex(system_prompt.as_bytes())),
             agents: self.agents_md_snapshot.0.as_deref().map(sha256_hex),
             skills: skill_runtime_fingerprint,
+            memory: Some(memory_fingerprint(messages)),
             tools: Some(serialized_fingerprint(tools)),
             messages: Some(serialized_fingerprint(messages)),
-            ..ContextComponentHashes::default()
+            images: Some(image_fingerprint(messages)),
+            tool_results: Some(tool_result_fingerprint(messages)),
         };
         self.refresh_components_binding(&components);
         let message_tokens = message_token_estimate(messages);
@@ -241,6 +281,28 @@ impl Agent {
             ));
         }
         plan
+    }
+
+    /// Проверяет revision непосредственно перед отправкой provider request.
+    ///
+    /// Между preflight и вызовом provider могут прийти внешние действия над
+    /// context. В таком случае локальный snapshot уже нельзя отправлять:
+    /// следующий проход соберёт новый transcript и новый preflight.
+    pub(super) fn final_provider_revision_gate(&self, revision: ContextRevision) -> bool {
+        let current = self
+            .context_controller
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .manifest()
+            .revision;
+        if current == revision {
+            return true;
+        }
+        crate::logging::warn(&format!(
+            "Skipping provider request for stale context revision {} (current {})",
+            revision.0, current.0
+        ));
+        false
     }
 
     /// Фиксирует завершение provider-ответа: сверяет revision и пишет usage.

@@ -403,6 +403,7 @@ fn export_action_metadata(
             "path": path.display().to_string(),
             "format": format.as_str(),
             "bytes": contents.len(),
+            "sha256": crate::context::sha256_hex(contents.as_bytes()),
             "overwritten": existed,
             "permissions": "0600",
             "external_storage": true,

@@ -701,7 +701,13 @@ async fn export_writes_a_private_redacted_file() {
         "the file must stay inside the exports directory"
     );
 
-    let contents = std::fs::read_to_string(path).expect("read export");
+    let file_bytes = std::fs::read(path).expect("read export");
+    assert_eq!(
+        metadata["file"]["sha256"],
+        json!(crate::context::sha256_hex(&file_bytes)),
+        "export metadata must identify the exact bytes written to disk"
+    );
+    let contents = String::from_utf8(file_bytes).expect("export is utf-8");
     let document: Value = serde_json::from_str(&contents).expect("export is json");
     assert_eq!(document["session_id"], json!("context-export-file"));
     assert_eq!(document["redacted"], json!(true));
