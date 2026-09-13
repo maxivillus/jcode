@@ -1146,6 +1146,9 @@ fn clear_stale_stream_text(event_tx: &mpsc::UnboundedSender<ServerEvent>) {
 mod context_action_tests;
 
 #[cfg(test)]
+mod context_evidence_tests;
+
+#[cfg(test)]
 mod context_prune_system_reminder_tests;
 
 #[cfg(test)]
