@@ -4,6 +4,7 @@ fn test_context_prune_roundtrip() -> Result<()> {
         id: 91,
         kind: "turns".to_string(),
         keep_recent: Some(4),
+        after_message_id: None,
     };
     let json = serde_json::to_string(&request)?;
     assert!(json.contains("\"type\":\"context_prune\""));
@@ -40,6 +41,35 @@ fn test_context_prune_roundtrip() -> Result<()> {
     assert_eq!(id, 91);
     assert_eq!(message, "queued");
     assert!(success);
+    Ok(())
+}
+
+#[test]
+fn test_context_tail_prune_roundtrip() -> Result<()> {
+    let request = Request::ContextPrune {
+        id: 92,
+        kind: "tail".to_string(),
+        keep_recent: None,
+        after_message_id: Some("message-2".to_string()),
+    };
+    let json = serde_json::to_string(&request)?;
+    assert!(json.contains("\"type\":\"context_prune\""));
+    assert!(json.contains("\"after\":\"message-2\""));
+
+    let decoded = parse_request_json(&json)?;
+    let Request::ContextPrune {
+        id,
+        kind,
+        keep_recent,
+        after_message_id,
+    } = decoded
+    else {
+        return Err(anyhow!("expected ContextPrune request"));
+    };
+    assert_eq!(id, 92);
+    assert_eq!(kind, "tail");
+    assert_eq!(keep_recent, None);
+    assert_eq!(after_message_id.as_deref(), Some("message-2"));
     Ok(())
 }
 

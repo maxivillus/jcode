@@ -74,6 +74,22 @@ fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
     messages.iter().map(StoredMessage::to_message).collect()
 }
 
+/// Состояние transcript и provider до последней обратимой мутации.
+///
+/// Snapshot хранится в том же полном Session snapshot, что и transcript. Это
+/// позволяет восстановить undo после перезапуска без отдельного sidecar-файла.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionUndoSnapshot {
+    pub messages: Vec<StoredMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_provider_session_id: Option<String>,
+    /// Число видимых сообщений до rewind. Для prune значение равно нулю.
+    #[serde(default)]
+    pub visible_message_count: usize,
+}
+
 fn is_internal_system_reminder_message(message: &StoredMessage) -> bool {
     message
         .content
@@ -118,6 +134,12 @@ pub struct Session {
     /// Provider-specific session ID (e.g., Claude Code CLI session for resume)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_id: Option<String>,
+    /// One-step rewind state persisted with the session snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewind_undo_snapshot: Option<SessionUndoSnapshot>,
+    /// One-step context-prune state persisted with the session snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prune_undo_snapshot: Option<SessionUndoSnapshot>,
     /// Stable provider/profile key for session-source filtering (e.g. "openai",
     /// "opencode", "opencode-go").
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -361,6 +383,8 @@ impl Session {
         session.messages = snapshot.messages;
         session.compaction = snapshot.compaction;
         session.provider_session_id = snapshot.provider_session_id;
+        session.rewind_undo_snapshot = snapshot.rewind_undo_snapshot;
+        session.prune_undo_snapshot = snapshot.prune_undo_snapshot;
         session.provider_key = snapshot.provider_key;
         session.model = snapshot.model;
         session.route_api_method = snapshot.route_api_method;
@@ -739,6 +763,8 @@ impl Session {
             messages: Vec::new(),
             compaction: None,
             provider_session_id: None,
+            rewind_undo_snapshot: None,
+            prune_undo_snapshot: None,
             provider_key: None,
             model: None,
             route_api_method: None,
@@ -793,6 +819,8 @@ impl Session {
             messages: Vec::new(),
             compaction: None,
             provider_session_id: None,
+            rewind_undo_snapshot: None,
+            prune_undo_snapshot: None,
             provider_key: None,
             model: None,
             route_api_method: None,
@@ -1125,6 +1153,11 @@ request in this new forked session, using the inherited conversation only as con
         if let Some(compaction) = redacted.compaction.as_mut() {
             compaction.summary_text = crate::message::redact_secrets(&compaction.summary_text);
         }
+        // Undo snapshots are private recovery state, not part of an export.
+        // Dropping them also prevents an export from carrying a second copy of
+        // the untrimmed transcript.
+        redacted.rewind_undo_snapshot = None;
+        redacted.prune_undo_snapshot = None;
         for msg in &mut redacted.messages {
             for block in &mut msg.content {
                 match block {
@@ -1532,6 +1565,8 @@ request in this new forked session, using the inherited conversation only as con
     pub fn strip_transcript_for_remote_client(&mut self) {
         self.messages.clear();
         self.compaction = None;
+        self.rewind_undo_snapshot = None;
+        self.prune_undo_snapshot = None;
         self.env_snapshots.clear();
         self.memory_injections.clear();
         self.replay_events.clear();
@@ -1611,6 +1646,10 @@ struct RemoteStartupSessionSnapshot {
     compaction: Option<StoredCompactionState>,
     #[serde(default)]
     provider_session_id: Option<String>,
+    #[serde(default)]
+    rewind_undo_snapshot: Option<SessionUndoSnapshot>,
+    #[serde(default)]
+    prune_undo_snapshot: Option<SessionUndoSnapshot>,
     #[serde(default)]
     provider_key: Option<String>,
     #[serde(default)]

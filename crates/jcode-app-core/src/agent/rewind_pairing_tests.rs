@@ -98,3 +98,35 @@ async fn rewind_refuses_to_cut_between_a_tool_call_and_its_result() {
         "rewind undo must restore the exact provider transcript hash"
     );
 }
+
+#[tokio::test]
+async fn rewind_undo_survives_session_reload() {
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = test_agent().await;
+    for text in ["one", "two", "three"] {
+        agent.add_message(Role::User, text_blocks(text));
+    }
+    let before_hash = provider_transcript_hash(&agent);
+
+    let removed = agent
+        .rewind_to_message(1)
+        .expect("rewind should persist an undo snapshot");
+    assert_eq!(removed, 2);
+
+    let persisted = crate::session::Session::load(agent.session_id())
+        .expect("rewind snapshot should be persisted");
+    assert!(persisted.rewind_undo_snapshot.is_some());
+
+    let provider = agent.provider.fork();
+    let registry = crate::tool::Registry::new(provider.clone()).await;
+    let mut restored = Agent::new_with_session(provider, registry, persisted, None);
+    let restored_count = restored
+        .undo_rewind()
+        .expect("reloaded rewind should remain undoable");
+
+    assert_eq!(restored_count, 2);
+    assert_eq!(provider_transcript_hash(&restored), before_hash);
+    let after_undo = crate::session::Session::load(restored.session_id())
+        .expect("restored session should remain loadable");
+    assert!(after_undo.rewind_undo_snapshot.is_none());
+}

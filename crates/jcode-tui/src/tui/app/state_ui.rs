@@ -2036,7 +2036,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             }
             ContextCommand::Invalid => {
                 app.push_display_message(DisplayMessage::error(
-                    "Использование: /context, /context status, /context preview, /context refresh, /context compact, /context reset-provider, /context export [path], /context snapshot [path], /context prune <turns|undo> [keep_recent=N]".to_string(),
+                    "Использование: /context, /context status, /context preview, /context refresh, /context compact, /context reset-provider, /context export [path], /context snapshot [path], /context prune <turns|tail|undo> [keep_recent=N|--after <message-id>]".to_string(),
                 ));
                 return true;
             }
@@ -2353,9 +2353,10 @@ pub(super) fn format_remote_context_status(
 pub(super) struct ContextPruneCommand {
     pub kind: String,
     pub keep_recent: Option<usize>,
+    pub after_message_id: Option<String>,
 }
 
-/// `/context prune <kind> [keep_recent=N]`, где kind это `turns` или `undo`.
+/// `/context prune <kind> [keep_recent=N|--after <message-id>]`.
 ///
 /// Опасные виды модель запросить не может: их ставит пользователь этой
 /// командой, а сервер применяет заявку на границе turn-а.
@@ -2363,23 +2364,55 @@ pub(super) fn parse_context_prune_command(trimmed: &str) -> Option<ContextPruneC
     let arguments = trimmed.strip_prefix("/context prune")?.trim();
     let mut parts = arguments.split_whitespace();
     let kind = parts.next()?.to_ascii_lowercase();
-    if !matches!(kind.as_str(), "turns" | "undo") {
+    if !matches!(kind.as_str(), "turns" | "tail" | "undo") {
         return None;
     }
 
     let mut keep_recent = None;
-    for part in parts {
-        let value = part.strip_prefix("keep_recent=")?;
-        let Ok(parsed) = value.parse::<usize>() else {
+    let mut after_message_id = None;
+    while let Some(part) = parts.next() {
+        if let Some(value) = part.strip_prefix("keep_recent=") {
+            if keep_recent.is_some() {
+                return None;
+            }
+            let Ok(parsed) = value.parse::<usize>() else {
+                return None;
+            };
+            keep_recent = Some(parsed);
+        } else if part == "--after" {
+            let value = parts.next()?;
+            if value.is_empty() || value.starts_with('-') || value.contains('=') {
+                return None;
+            }
+            if after_message_id.is_some() {
+                return None;
+            }
+            after_message_id = Some(value.to_string());
+        } else if let Some(value) = part.strip_prefix("--after=") {
+            if value.is_empty() || value.starts_with('-') || value.contains('=') {
+                return None;
+            }
+            if after_message_id.is_some() {
+                return None;
+            }
+            after_message_id = Some(value.to_string());
+        } else {
             return None;
-        };
-        keep_recent = Some(parsed);
-    }
-    if kind == "undo" && keep_recent.is_some() {
-        return None;
+        }
     }
 
-    Some(ContextPruneCommand { kind, keep_recent })
+    match kind.as_str() {
+        "turns" if after_message_id.is_none() => {}
+        "tail" if keep_recent.is_none() && after_message_id.is_some() => {}
+        "undo" if keep_recent.is_none() && after_message_id.is_none() => {}
+        _ => return None,
+    }
+
+    Some(ContextPruneCommand {
+        kind,
+        keep_recent,
+        after_message_id,
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2684,6 +2717,7 @@ mod context_command_tests {
             Some(ContextPruneCommand {
                 kind: "turns".to_string(),
                 keep_recent: Some(4),
+                after_message_id: None,
             })
         );
         assert_eq!(
@@ -2691,16 +2725,45 @@ mod context_command_tests {
             Some(ContextPruneCommand {
                 kind: "undo".to_string(),
                 keep_recent: None,
+                after_message_id: None,
             })
         );
         assert_eq!(parse_context_prune_command("/context prune"), None);
         assert_eq!(parse_context_prune_command("/context prune tail"), None);
+        assert_eq!(
+            parse_context_prune_command("/context prune tail --after message-2"),
+            Some(ContextPruneCommand {
+                kind: "tail".to_string(),
+                keep_recent: None,
+                after_message_id: Some("message-2".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_context_prune_command("/context prune tail --after=message-2"),
+            Some(ContextPruneCommand {
+                kind: "tail".to_string(),
+                keep_recent: None,
+                after_message_id: Some("message-2".to_string()),
+            })
+        );
         assert_eq!(
             parse_context_prune_command("/context prune turns keep_recent=x"),
             None
         );
         assert_eq!(
             parse_context_prune_command("/context prune undo keep_recent=1"),
+            None
+        );
+        assert_eq!(
+            parse_context_prune_command("/context prune turns --after message-2"),
+            None
+        );
+        assert_eq!(
+            parse_context_prune_command("/context prune tail keep_recent=1 --after message-2"),
+            None
+        );
+        assert_eq!(
+            parse_context_prune_command("/context prune undo --after message-2"),
             None
         );
     }

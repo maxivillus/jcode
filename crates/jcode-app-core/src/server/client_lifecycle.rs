@@ -1978,6 +1978,7 @@ pub(super) async fn handle_client(
                 id,
                 kind,
                 keep_recent,
+                after_message_id,
             } => {
                 if reject_if_agent_busy_for_request(
                     id,
@@ -1989,7 +1990,14 @@ pub(super) async fn handle_client(
                 ) {
                     continue;
                 }
-                handle_context_prune(id, &kind, keep_recent, &agent, &client_event_tx);
+                handle_context_prune(
+                    id,
+                    &kind,
+                    keep_recent,
+                    after_message_id,
+                    &agent,
+                    &client_event_tx,
+                );
             }
 
             Request::TriggerMemoryExtraction { id } => {

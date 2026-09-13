@@ -1107,7 +1107,14 @@ async fn handle_remote_key_internal(
                         "Запрашиваю обрезку контекста ({}) на удалённом server...",
                         prune.kind
                     )));
-                    if let Err(error) = remote.context_prune(&prune.kind, prune.keep_recent).await {
+                    if let Err(error) = remote
+                        .context_prune_with_after(
+                            &prune.kind,
+                            prune.keep_recent,
+                            prune.after_message_id.as_deref(),
+                        )
+                        .await
+                    {
                         app.push_display_message(DisplayMessage::error(format!(
                             "Не удалось запросить обрезку контекста: {error}"
                         )));

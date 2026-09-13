@@ -393,6 +393,8 @@ impl Session {
             && self.testing_build.is_none()
             && self.compaction.is_none()
             && self.improve_mode.is_none()
+            && self.rewind_undo_snapshot.is_none()
+            && self.prune_undo_snapshot.is_none()
         {
             return Ok(());
         }

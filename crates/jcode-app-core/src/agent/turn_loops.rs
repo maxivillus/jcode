@@ -141,6 +141,39 @@ impl Agent {
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let context_plan = self.prepare_context_preflight(send_messages, &tools, &split_prompt);
+            if trace {
+                let system_prompt_estimated_tokens = split_prompt.estimated_tokens();
+                let tool_definition_estimated_tokens =
+                    ToolDefinition::aggregate_prompt_token_estimate(&tools);
+                let (image_count, image_estimated_tokens) = send_messages
+                    .iter()
+                    .flat_map(|message| message.content.iter())
+                    .filter_map(|block| match block {
+                        ContentBlock::Image { .. } => {
+                            Some(super::context_control::block_token_estimate(block))
+                        }
+                        _ => None,
+                    })
+                    .fold((0usize, 0usize), |(count, tokens), estimate| {
+                        (count.saturating_add(1), tokens.saturating_add(estimate))
+                    });
+                eprintln!(
+                    "[trace] context_metrics revision={} estimated_input={} message_estimated={} system_prompt_estimated={} tool_definition_count={} tool_definition_estimated={} image_count={} image_estimated_tokens={} provider_context_limit={} max_input_tokens={}",
+                    context_plan.revision.0,
+                    context_plan.estimated_input_tokens,
+                    context_plan
+                        .estimated_input_tokens
+                        .saturating_sub(system_prompt_estimated_tokens)
+                        .saturating_sub(tool_definition_estimated_tokens),
+                    system_prompt_estimated_tokens,
+                    tools.len(),
+                    tool_definition_estimated_tokens,
+                    image_count,
+                    image_estimated_tokens,
+                    self.provider.context_window(),
+                    context_plan.max_input_tokens,
+                );
+            }
             let context_revision = context_plan.revision;
             if context_plan.needs_compaction()
                 && self.try_auto_compact_after_context_limit("context length preflight exceeded")
