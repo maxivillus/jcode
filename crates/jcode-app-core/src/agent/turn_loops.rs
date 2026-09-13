@@ -123,21 +123,18 @@ impl Agent {
                 batch_nudge_pending = false;
                 sequential_single_tool_rounds = 0;
             }
-
             logging::info(&format!(
                 "API call starting: {} messages, {} tools",
                 messages_with_memory.len(),
                 tools.len()
             ));
             let api_start = Instant::now();
-
             // Publish status for TUI to show during Task execution
             Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
                 session_id: self.session.id.clone(),
                 status: "calling API".to_string(),
                 model: Some(self.provider.model()),
             }));
-
             let stamped = crate::config::config()
                 .features
                 .message_timestamps

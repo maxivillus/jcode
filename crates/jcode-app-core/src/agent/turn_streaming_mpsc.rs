@@ -203,14 +203,12 @@ impl Agent {
                 }
                 messages_with_memory.push(memory_msg);
             }
-
             logging::info(&format!(
                 "API call starting: {} messages, {} tools",
                 messages_with_memory.len(),
                 tools.len()
             ));
             let api_start = Instant::now();
-
             let stamped = crate::config::config()
                 .features
                 .message_timestamps
@@ -312,7 +310,6 @@ impl Agent {
                     }
                 }
             };
-
             // `complete_split` has consumed the request and returned an owned
             // response stream. Keeping these full transcript snapshots alive
             // while tokens arrive needlessly multiplies active-session memory.
