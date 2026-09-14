@@ -2388,7 +2388,8 @@ pub(super) fn parse_context_prune_command(trimmed: &str) -> Option<ContextPruneC
                 return None;
             }
             after_message_id = Some(value.to_string());
-        } else if let Some(value) = part.strip_prefix("--after=") {
+        } else {
+            let value = part.strip_prefix("--after=")?;
             if value.is_empty() || value.starts_with('-') || value.contains('=') {
                 return None;
             }
@@ -2396,8 +2397,6 @@ pub(super) fn parse_context_prune_command(trimmed: &str) -> Option<ContextPruneC
                 return None;
             }
             after_message_id = Some(value.to_string());
-        } else {
-            return None;
         }
     }
 
