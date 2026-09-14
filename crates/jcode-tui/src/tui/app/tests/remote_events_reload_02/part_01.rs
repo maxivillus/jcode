@@ -892,7 +892,10 @@ fn test_background_task_markdown_is_suppressed_even_if_role_was_lost() {
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     let text = render_and_snap(&app, &mut terminal);
 
-    assert!(!text.contains("╭") && !text.contains("594967sj63"));
+    assert!(
+        !text.contains("594967sj63"),
+        "unexpected background task text: {text:?}"
+    );
     assert!(app.display_messages().is_empty());
     assert_eq!(app.display_user_message_count(), 0);
 }

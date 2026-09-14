@@ -2296,8 +2296,24 @@ fn anthropic_recommended_model_from_error(error_str: &str) -> Option<String> {
         .split("please use")
         .nth(1)
         .or_else(|| error_str.split("use ").nth(1))?;
-    // Take up to the next sentence boundary.
-    let hint = hint.split(['.', '!', '\n']).next().unwrap_or(hint).trim();
+    // Take up to the next sentence boundary, but keep decimal version dots
+    // such as `4.8`; the dot is a sentence boundary only when it is not
+    // immediately followed by a digit.
+    let sentence_end = hint
+        .char_indices()
+        .find_map(|(index, character)| match character {
+            '!' | '\n' => Some(index),
+            '.' if !hint[index + character.len_utf8()..]
+                .chars()
+                .next()
+                .is_some_and(|next| next.is_ascii_digit()) =>
+            {
+                Some(index)
+            }
+            _ => None,
+        })
+        .unwrap_or(hint.len());
+    let hint = hint[..sentence_end].trim();
     if hint.is_empty() {
         return None;
     }

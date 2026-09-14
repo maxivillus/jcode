@@ -735,6 +735,7 @@ mod light_theme_interaction {
     /// behavior.
     #[test]
     fn configured_colors_survive_the_light_theme_pass() {
+        crate::color::pin_truecolor_for_tests();
         struct Restore;
         impl Drop for Restore {
             fn drop(&mut self) {

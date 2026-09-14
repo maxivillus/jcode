@@ -177,7 +177,8 @@ pub fn has_cursor_vscdb_token() -> bool {
 }
 
 /// Read access token from Cursor IDE's SQLite storage (state.vscdb).
-/// Uses the `sqlite3` CLI to avoid adding a native dependency.
+/// Uses the bundled `rusqlite` reader so auth does not depend on an external
+/// `sqlite3` executable.
 pub fn read_vscdb_token() -> Result<String> {
     let db_path = find_cursor_vscdb()?;
     read_vscdb_key(&db_path, "cursorAuth/accessToken")
