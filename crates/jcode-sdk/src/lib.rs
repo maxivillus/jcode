@@ -50,6 +50,7 @@ pub use structured::{
 /// The protocol types, re-exported so a client needs one dependency, not two.
 pub use jcode_harness_api as api;
 pub use jcode_harness_api::{
-    ApiEvent, ApiRequest, HistoryMessage, ModelRouteInfo, PermissionDecision, RenderedImage,
-    RenderedImageAnchor, RenderedImageSource, SessionInfo, TextMatch, api_socket_path,
+    ApiEvent, ApiRequest, ContextPruneKind, ContextStatusSnapshot, HistoryMessage, ModelRouteInfo,
+    PermissionDecision, RenderedImage, RenderedImageAnchor, RenderedImageSource, SessionInfo,
+    TextMatch, api_socket_path,
 };

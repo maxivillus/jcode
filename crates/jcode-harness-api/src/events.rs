@@ -1,6 +1,22 @@
 //! Server-to-client events: replies and streaming.
 
+use crate::requests::ContextPruneKind;
 use serde::{Deserialize, Serialize};
+
+/// Safe aggregate context metadata returned by an explicit status query.
+///
+/// The bridge deliberately excludes prompt text, transcript content, tool
+/// arguments, images, credentials, and raw evidence references.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextStatusSnapshot {
+    pub schema_version: u32,
+    pub revision: u64,
+    pub provider_generation: u64,
+    pub estimated_input_tokens: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_input_tokens: Option<usize>,
+    pub fingerprint: String,
+}
 
 /// Curated event surface. Internally-tagged on `"ev"`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -249,6 +265,23 @@ pub enum ApiEvent {
         session_id: String,
         /// Human-readable status, e.g. why compaction was refused.
         message: String,
+    },
+
+    /// A user-authorized structural prune was queued successfully.
+    ContextPruned {
+        session_id: String,
+        kind: ContextPruneKind,
+        message: String,
+    },
+
+    /// The provider session and cache baseline were reset without changing the
+    /// persisted transcript.
+    ProviderReset { session_id: String, message: String },
+
+    /// Aggregate context metadata returned by `GetContextStatus`.
+    ContextStatus {
+        session_id: String,
+        status: ContextStatusSnapshot,
     },
 
     /// A session's title changed, whether set by a client or generated.

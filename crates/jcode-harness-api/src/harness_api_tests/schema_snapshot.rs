@@ -21,6 +21,43 @@ fn client_frame_wire_shape() {
 }
 
 #[test]
+fn context_control_wire_shapes() {
+    let frame = ClientFrame::new(
+        10,
+        ApiRequest::ContextPrune {
+            session_id: "s1".into(),
+            kind: ContextPruneKind::Tail,
+            keep_recent: None,
+            after: Some("m4".into()),
+        },
+    );
+    let json = serde_json::to_string(&frame).unwrap();
+    assert_eq!(
+        json,
+        r#"{"v":1,"id":10,"req":"context_prune","session_id":"s1","kind":"tail","after":"m4"}"#
+    );
+
+    let status = ContextStatusSnapshot {
+        schema_version: 1,
+        revision: 7,
+        provider_generation: 3,
+        estimated_input_tokens: 512,
+        observed_input_tokens: Some(480),
+        fingerprint: "fp-7".into(),
+    };
+    let reply = ServerFrame::reply(
+        11,
+        ApiEvent::ContextStatus {
+            session_id: "s1".into(),
+            status,
+        },
+    );
+    let back: ServerFrame = serde_json::from_str(&serde_json::to_string(&reply).unwrap()).unwrap();
+    assert_eq!(reply, back);
+    assert_eq!(back.reply_to, Some(11));
+}
+
+#[test]
 fn send_message_no_reply_wire_shape_and_legacy_default() {
     let frame = ClientFrame::new(
         8,
@@ -148,6 +185,30 @@ fn request_roundtrip() {
         ApiRequest::FileStatus {
             session_id: "s1".into(),
             path: "src/lib.rs".into(),
+        },
+        ApiRequest::ContextPrune {
+            session_id: "s1".into(),
+            kind: ContextPruneKind::Turns,
+            keep_recent: Some(3),
+            after: None,
+        },
+        ApiRequest::ContextPrune {
+            session_id: "s1".into(),
+            kind: ContextPruneKind::Tail,
+            keep_recent: None,
+            after: Some("m4".into()),
+        },
+        ApiRequest::ContextPrune {
+            session_id: "s1".into(),
+            kind: ContextPruneKind::Undo,
+            keep_recent: None,
+            after: None,
+        },
+        ApiRequest::ResetProvider {
+            session_id: "s1".into(),
+        },
+        ApiRequest::GetContextStatus {
+            session_id: "s1".into(),
         },
         ApiRequest::Ping,
     ];

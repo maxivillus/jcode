@@ -245,6 +245,7 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
                 "session_retention",
                 "session_files",
                 "session_fork",
+                "context_control",
             ]
             .into_iter()
             .map(str::to_string)

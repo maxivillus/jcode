@@ -3,7 +3,8 @@
 
 use crate::background_progress::parse_background_notification;
 use jcode_harness_api::{
-    ApiEvent, ErrorCode, HistoryMessage, ModelRouteInfo, ServerFrame, SessionInfo, TextMatch,
+    ApiEvent, ContextPruneKind, ContextStatusSnapshot, ErrorCode, HistoryMessage, ModelRouteInfo,
+    ServerFrame, SessionInfo, TextMatch,
 };
 use rusqlite::{Connection, params};
 use serde::Deserialize;
@@ -38,6 +39,9 @@ const REQUIRES_ATTACH: &[&str] = &[
     "set_model",
     "set_reasoning_effort",
     "compact",
+    "context_prune",
+    "reset_provider",
+    "get_context_status",
     "rename_session",
     "get_runtime_info",
     "fork_session",
@@ -232,12 +236,66 @@ enum SimpleKind {
     ReasoningEffort,
     /// Awaiting `compacted_history`.
     Compact,
+    /// Awaiting `context_prune_result`, retaining the public kind because the
+    /// legacy result does not echo it.
+    ContextPrune {
+        kind: ContextPruneKind,
+    },
+    /// Awaiting `provider_reset_result`.
+    ProviderReset,
+    /// Awaiting a `state` response carrying `context_status`.
+    ContextStatus,
     /// Awaiting the catalog reply that answers `list_models`.
     Models,
     Credential {
         provider: String,
         configured: bool,
     },
+}
+
+#[derive(Debug, Deserialize)]
+struct ContextPruneRequest {
+    kind: ContextPruneKind,
+    #[serde(default)]
+    keep_recent: Option<usize>,
+    #[serde(default)]
+    after: Option<String>,
+}
+
+fn parse_context_prune_request(request: &Value) -> Result<ContextPruneRequest, String> {
+    let mut parsed: ContextPruneRequest = serde_json::from_value(request.clone())
+        .map_err(|error| format!("invalid context_prune request: {error}"))?;
+
+    if let Some(after) = parsed.after.as_mut() {
+        *after = after.trim().to_string();
+        if after.is_empty() {
+            return Err("context_prune tail requires a non-empty `after` message id".into());
+        }
+    }
+
+    match parsed.kind {
+        ContextPruneKind::Turns if parsed.after.is_some() => {
+            Err("context_prune turns does not accept `after`".into())
+        }
+        ContextPruneKind::Tail if parsed.keep_recent.is_some() => {
+            Err("context_prune tail accepts only `after`".into())
+        }
+        ContextPruneKind::Tail if parsed.after.is_none() => {
+            Err("context_prune tail requires `after`".into())
+        }
+        ContextPruneKind::Undo if parsed.keep_recent.is_some() || parsed.after.is_some() => {
+            Err("context_prune undo does not accept `keep_recent` or `after`".into())
+        }
+        _ => Ok(parsed),
+    }
+}
+
+fn context_prune_kind_name(kind: ContextPruneKind) -> &'static str {
+    match kind {
+        ContextPruneKind::Turns => "turns",
+        ContextPruneKind::Tail => "tail",
+        ContextPruneKind::Undo => "undo",
+    }
 }
 
 impl BridgeState {
@@ -825,6 +883,46 @@ impl BridgeState {
                 self.pending_simple.push((id, api_id, SimpleKind::Compact));
                 vec![Outbound::Legacy(json!({"type": "compact", "id": id}))]
             }
+            "context_prune" => {
+                let parsed = match parse_context_prune_request(request) {
+                    Ok(parsed) => parsed,
+                    Err(message) => {
+                        return Self::error_reply(api_id, ErrorCode::InvalidRequest, &message);
+                    }
+                };
+                let id = self.legacy_id();
+                self.pending_simple.push((
+                    id,
+                    api_id,
+                    SimpleKind::ContextPrune { kind: parsed.kind },
+                ));
+                let mut prune = json!({
+                    "type": "context_prune",
+                    "id": id,
+                    "kind": context_prune_kind_name(parsed.kind),
+                });
+                if let Some(keep_recent) = parsed.keep_recent {
+                    prune["keep_recent"] = json!(keep_recent);
+                }
+                if let Some(after) = parsed.after {
+                    prune["after"] = json!(after);
+                }
+                vec![Outbound::Legacy(prune)]
+            }
+            "reset_provider" => {
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::ProviderReset));
+                vec![Outbound::Legacy(
+                    json!({"type": "reset_provider", "id": id}),
+                )]
+            }
+            "get_context_status" => {
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::ContextStatus));
+                vec![Outbound::Legacy(json!({"type": "state", "id": id}))]
+            }
             "rename_session" => {
                 let id = self.legacy_id();
                 self.pending_simple.push((id, api_id, SimpleKind::Ok));
@@ -952,6 +1050,43 @@ impl BridgeState {
                                 archived: false,
                                 archived_at_ms: None,
                             },
+                        },
+                    )];
+                }
+                if let Some(api_id) = self.take_simple(id, SimpleKind::ContextStatus) {
+                    let context_session_id = if session_id.is_empty() {
+                        session(self)
+                    } else {
+                        session_id
+                    };
+                    let Some(status) = event.get("context_status").cloned() else {
+                        return vec![ServerFrame::reply(
+                            api_id,
+                            ApiEvent::Error {
+                                code: ErrorCode::Internal,
+                                message: "daemon state did not include context_status".into(),
+                            },
+                        )];
+                    };
+                    let status = match serde_json::from_value::<ContextStatusSnapshot>(status) {
+                        Ok(status) => status,
+                        Err(error) => {
+                            return vec![ServerFrame::reply(
+                                api_id,
+                                ApiEvent::Error {
+                                    code: ErrorCode::Internal,
+                                    message: format!(
+                                        "daemon returned an invalid context_status snapshot: {error}"
+                                    ),
+                                },
+                            )];
+                        }
+                    };
+                    return vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::ContextStatus {
+                            session_id: context_session_id,
+                            status,
                         },
                     )];
                 }
@@ -1242,6 +1377,53 @@ impl BridgeState {
                 vec![ServerFrame::reply(
                     api_id,
                     ApiEvent::Compacted {
+                        session_id: session(self),
+                        message,
+                    },
+                )]
+            }
+            "context_prune_result" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some((api_id, kind)) = self.take_context_prune(id) else {
+                    return vec![];
+                };
+                let message = event["message"].as_str().unwrap_or("").to_string();
+                if event["success"].as_bool() == Some(false) {
+                    return vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message,
+                        },
+                    )];
+                }
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::ContextPruned {
+                        session_id: session(self),
+                        kind,
+                        message,
+                    },
+                )]
+            }
+            "provider_reset_result" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(api_id) = self.take_simple(id, SimpleKind::ProviderReset) else {
+                    return vec![];
+                };
+                let message = event["message"].as_str().unwrap_or("").to_string();
+                if event["success"].as_bool() == Some(false) {
+                    return vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message,
+                        },
+                    )];
+                }
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::ProviderReset {
                         session_id: session(self),
                         message,
                     },
@@ -2333,6 +2515,17 @@ impl BridgeState {
             .iter()
             .position(|(id, _, k)| *id == legacy_id && *k == kind)?;
         Some(self.pending_simple.remove(index).1)
+    }
+
+    fn take_context_prune(&mut self, legacy_id: u64) -> Option<(u64, ContextPruneKind)> {
+        let index = self.pending_simple.iter().position(|(id, _, kind)| {
+            *id == legacy_id && matches!(kind, SimpleKind::ContextPrune { .. })
+        })?;
+        let (_, api_id, kind) = self.pending_simple.remove(index);
+        let SimpleKind::ContextPrune { kind } = kind else {
+            unreachable!("context prune helper selected a different request kind");
+        };
+        Some((api_id, kind))
     }
 }
 
