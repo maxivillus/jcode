@@ -97,6 +97,31 @@ impl Agent {
         split.dynamic_part.push_str(reminder);
     }
 
+    fn append_execution_state_prompt(
+        &self,
+        split: &mut crate::prompt::SplitSystemPrompt,
+        has_active_skill: bool,
+    ) {
+        if !has_active_skill {
+            return;
+        }
+
+        let summary = self
+            .context_controller
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .execution_state()
+            .prompt_summary();
+        if summary.is_empty() {
+            return;
+        }
+
+        if !split.dynamic_part.is_empty() {
+            split.dynamic_part.push_str("\n\n");
+        }
+        split.dynamic_part.push_str(&summary);
+    }
+
     /// Build split system prompt for better caching
     /// Returns static (cacheable) and dynamic (not cached) parts separately
     pub(super) fn build_system_prompt_split(
@@ -146,6 +171,7 @@ impl Agent {
             &mut split,
             self.provider.reasoning_effort().as_deref(),
         );
+        self.append_execution_state_prompt(&mut split, skill_prompt.is_some());
 
         split
     }

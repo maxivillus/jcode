@@ -7,6 +7,7 @@
 //! кэшируемую часть промпта.
 
 use super::context_action_tests::test_agent;
+use crate::execution_state::{ExecutionStatePatch, PatchValue};
 
 #[tokio::test]
 async fn active_skill_lives_in_the_dynamic_prompt_and_leaves_no_transcript_residue() {
@@ -40,6 +41,36 @@ async fn active_skill_lives_in_the_dynamic_prompt_and_leaves_no_transcript_resid
     assert!(
         !split.static_part.contains("DEMO_SKILL_BODY"),
         "the skill body must not enter the cacheable part of the prompt"
+    );
+
+    {
+        let mut controller = agent.context_controller.lock().expect("controller lock");
+        let state = controller.execution_state();
+        let mut patch = ExecutionStatePatch::new(state.state_schema.clone(), state.revision);
+        patch.goal = Some(PatchValue::Set("Review the current diff".to_string()));
+        patch.phase = Some(PatchValue::Set("verification".to_string()));
+        patch.next_action = Some(PatchValue::Set("Run focused tests".to_string()));
+        controller
+            .apply_execution_state_patch(&patch)
+            .expect("execution state patch");
+    }
+
+    let with_state = agent.build_system_prompt_split(None);
+    assert!(with_state.dynamic_part.contains("# Execution State"));
+    assert!(
+        with_state
+            .dynamic_part
+            .contains("goal: Review the current diff")
+    );
+    assert!(
+        with_state
+            .dynamic_part
+            .contains("next_action: Run focused tests")
+    );
+    assert!(!with_state.static_part.contains("# Execution State"));
+    assert_eq!(
+        split.static_part, with_state.static_part,
+        "execution state must stay out of the cacheable prompt prefix"
     );
 
     assert!(agent.set_remote_active_skill(None));
