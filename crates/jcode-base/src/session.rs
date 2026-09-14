@@ -87,6 +87,15 @@ fn is_internal_system_reminder_message(message: &StoredMessage) -> bool {
         .is_some_and(|text| text.starts_with("<system-reminder>"))
 }
 
+fn is_initial_session_context_message(message: &StoredMessage) -> bool {
+    message.role == Role::User
+        && message.display_role == Some(StoredDisplayRole::System)
+        && message.content.len() == 1
+        && message.content.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text, .. } if text.starts_with(SESSION_CONTEXT_PREFIX))
+        })
+}
+
 fn is_visible_conversation_message(message: &StoredMessage) -> bool {
     message.display_role.is_none()
         && !is_internal_system_reminder_message(message)
