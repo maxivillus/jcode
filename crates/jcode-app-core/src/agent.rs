@@ -1148,5 +1148,8 @@ mod skill_prompt_tests;
 mod rewind_pairing_tests;
 
 #[cfg(test)]
+mod context_control_benchmark;
+
+#[cfg(test)]
 #[path = "agent_tests.rs"]
 mod tests;
