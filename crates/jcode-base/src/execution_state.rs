@@ -14,6 +14,15 @@ pub const EXECUTION_STATE_PATCH_SCHEMA_VERSION: u32 = 1;
 pub const MAX_EXECUTION_STATE_SCHEMA_CHARS: usize = 128;
 pub const MAX_EXECUTION_STATE_TEXT_CHARS: usize = 512;
 pub const MAX_EXECUTION_STATE_LIST_ITEMS: usize = 128;
+/// Верхняя граница текста state, который можно добавить в prompt модели.
+///
+/// Проекция намеренно меньше полного machine-readable state: она сохраняет
+/// рабочие поля skill-run, но не переносит в prompt owner, lease и raw evidence
+/// references. Лимит держит dynamic-часть предсказуемой и не затрагивает
+/// cacheable static prefix.
+pub const MAX_EXECUTION_STATE_PROMPT_CHARS: usize = 2048;
+const MAX_EXECUTION_STATE_PROMPT_ITEM_CHARS: usize = 192;
+const MAX_EXECUTION_STATE_PROMPT_ITEMS: usize = 8;
 
 const EXECUTION_STATE_ALLOWED_ACTIONS: [&str; 5] = [
     "get_state",
@@ -495,6 +504,46 @@ impl ExecutionState {
         crate::context::sha256_hex(encoded)
     }
 
+    /// Строит bounded human-readable projection для активного skill prompt.
+    ///
+    /// Это не замена полному state или `skill_state`: machine-readable contract
+    /// остаётся доступен через tool. В prompt попадают только operational fields,
+    /// которые нужны для продолжения процедуры. `owner`, `lease` и значения
+    /// `evidence_refs` не копируются в provider-facing текст.
+    pub fn prompt_summary(&self) -> String {
+        let mut summary = String::from("# Execution State\n");
+        append_prompt_line(
+            &mut summary,
+            "schema_version",
+            &self.schema_version.to_string(),
+        );
+        append_prompt_line(&mut summary, "state_schema", &self.state_schema);
+        append_prompt_line(&mut summary, "revision", &self.revision.0.to_string());
+        append_prompt_optional_line(&mut summary, "goal", self.goal.as_deref());
+        append_prompt_optional_line(&mut summary, "phase", self.phase.as_deref());
+        append_prompt_optional_line(&mut summary, "next_action", self.next_action.as_deref());
+        append_prompt_list(
+            &mut summary,
+            "acceptance_criteria",
+            self.acceptance_criteria.as_deref(),
+        );
+        append_prompt_list(&mut summary, "pending", self.pending.as_deref());
+        append_prompt_list(&mut summary, "blockers", self.blockers.as_deref());
+        append_prompt_list(&mut summary, "completed", self.completed.as_deref());
+        append_prompt_list(&mut summary, "decisions", self.decisions.as_deref());
+        append_prompt_list(&mut summary, "changed_files", self.changed_files.as_deref());
+        append_prompt_list(&mut summary, "tests", self.tests.as_deref());
+        if let Some(count) = self.evidence_refs.as_ref().map(Vec::len) {
+            append_prompt_line(&mut summary, "evidence_count", &count.to_string());
+        }
+        append_prompt_optional_line(
+            &mut summary,
+            "source_revision",
+            self.source_revision.as_deref(),
+        );
+        summary
+    }
+
     /// Строит следующий state без изменения текущего значения.
     pub fn preview_patch(&self, patch: &ExecutionStatePatch) -> Result<Self, ExecutionStateError> {
         self.validate()?;
@@ -530,6 +579,77 @@ impl ExecutionState {
         *self = next;
         Ok(())
     }
+}
+
+fn append_prompt_optional_line(output: &mut String, label: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        append_prompt_line(output, label, value);
+    }
+}
+
+fn append_prompt_list(output: &mut String, label: &str, values: Option<&[String]>) {
+    let Some(values) = values else {
+        return;
+    };
+
+    for (index, value) in values
+        .iter()
+        .take(MAX_EXECUTION_STATE_PROMPT_ITEMS)
+        .enumerate()
+    {
+        append_prompt_line(output, &format!("{label}[{}]", index + 1), value);
+    }
+}
+
+fn append_prompt_line(output: &mut String, label: &str, value: &str) {
+    let value = collapse_prompt_text(value, MAX_EXECUTION_STATE_PROMPT_ITEM_CHARS);
+    if value.is_empty() {
+        return;
+    }
+
+    let line = format!("{label}: {value}\n");
+    let current_chars = output.chars().count();
+    let line_chars = line.chars().count();
+    if current_chars.saturating_add(line_chars) <= MAX_EXECUTION_STATE_PROMPT_CHARS {
+        output.push_str(&line);
+    }
+}
+
+fn collapse_prompt_text(value: &str, max_chars: usize) -> String {
+    let content_limit = max_chars.saturating_sub(1);
+    let mut output = String::new();
+    let mut truncated = false;
+
+    for word in value.split_whitespace() {
+        let separator = usize::from(!output.is_empty());
+        let current_chars = output.chars().count();
+        let available = content_limit.saturating_sub(current_chars);
+        if available <= separator {
+            truncated = true;
+            break;
+        }
+
+        let word_chars = word.chars().count();
+        if word_chars <= available - separator {
+            if separator == 1 {
+                output.push(' ');
+            }
+            output.push_str(word);
+            continue;
+        }
+
+        if separator == 1 {
+            output.push(' ');
+        }
+        output.extend(word.chars().take(available - separator));
+        truncated = true;
+        break;
+    }
+
+    if truncated {
+        output.push('…');
+    }
+    output
 }
 
 /// Patch, который модель или другой runtime-клиент может предложить для

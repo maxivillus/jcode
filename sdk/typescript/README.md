@@ -228,6 +228,9 @@ discovery pass only.
 | `fileStatus(id, path)` | Read safe rooted file metadata |
 | `setReasoningEffort(id, effort)` | Set the cost/quality dial |
 | `compact(id)` | Schedule transcript compaction to free context |
+| `contextPrune(id, kind, keepRecent?, after?)` | Reversibly prune structural context (`turns`, `tail`, or `undo`) |
+| `resetProvider(id)` | Reset provider session/cache state without changing the transcript |
+| `getContextStatus(id)` | Read bounded context revision, token estimate, and fingerprint metadata |
 | `renameSession(id, title?)` | Set a session title, or clear it |
 | `rewindUndo(id)` | Restore what the last `rewind` removed |
 | `cancelSoftInterrupts(id)` | Retract queued soft interrupts |
@@ -286,6 +289,26 @@ It is refused below about 10% context usage, on the grounds that there is
 nothing worth compacting yet, and the rejection carries the current usage. So
 treat `invalid_request` here as information for the user rather than an error
 to retry.
+
+For a more targeted, reversible operation, `contextPrune()` exposes only the
+stable structural kinds. `turns` drops old complete turn groups while keeping
+the requested number of recent groups, `tail` drops everything after the
+specified message id, and `undo` restores the last reversible prune. The bridge
+rejects options that do not belong to the selected kind before they reach the
+daemon:
+
+```ts
+await client.contextPrune(id, "turns", 4);
+await client.contextPrune(id, "tail", undefined, messageId);
+await client.contextPrune(id, "undo");
+```
+
+`getContextStatus(id)` returns aggregate metadata only: a context `revision`,
+provider generation, estimated and optionally observed input-token counts, and
+a fingerprint. It does not return transcript text, tool arguments, images,
+credentials, or raw evidence references. `resetProvider(id)` clears the
+provider-side session/cache baseline without changing persisted history, which
+is useful when a provider session is stale but the conversation must remain.
 
 ```ts
 await client.renameSession(id, "nightly refactor");  // omit the title to clear it

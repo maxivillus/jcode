@@ -180,7 +180,6 @@ async fn busy_agent_request_rejection_does_not_wait_for_agent_lock() {
             ..
         })
     ));
-
     drop(busy_agent_lock);
     assert!(!reject_if_agent_busy_for_request(
         18,
@@ -192,7 +191,6 @@ async fn busy_agent_request_rejection_does_not_wait_for_agent_lock() {
     ));
     assert!(client_event_rx.try_recv().is_err());
 }
-
 #[tokio::test]
 async fn context_message_persists_without_starting_turn() {
     let _guard = crate::storage::lock_test_env();
@@ -1413,3 +1411,5 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
 fn decode_request_or_event(line: &str) -> ServerEvent {
     serde_json::from_str(line.trim()).expect("decode server event")
 }
+#[path = "client_lifecycle_context_control_tests.rs"]
+mod context_control_tests;

@@ -26,6 +26,9 @@ use std::sync::mpsc::{
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+#[path = "client_context_control.rs"]
+mod context_control;
+
 /// How a client reaches the harness.
 pub struct ConnectOptions {
     /// Defaults to the resolved harness API socket path.
@@ -105,9 +108,9 @@ impl Transport for UnixTransport {
         #[cfg(unix)]
         {
             let socket = self.0.try_clone().ok()?;
-            return Some(Arc::new(move || {
+            Some(Arc::new(move || {
                 let _ = socket.shutdown(std::net::Shutdown::Both);
-            }));
+            }))
         }
         #[cfg(windows)]
         {
@@ -311,7 +314,7 @@ struct Inner {
     /// Requests waiting for their `reply_to` frame.
     pending: Mutex<HashMap<u64, Sender<ServerFrame>>>,
     /// Live subscriptions: (id, session filter, sink).
-    subscribers: Mutex<Vec<(u64, Option<String>, Sender<ApiEvent>)>>,
+    subscribers: Mutex<Vec<Subscriber>>,
     next_id: AtomicU64,
     next_sub: AtomicU64,
     closed: AtomicBool,
@@ -322,6 +325,8 @@ struct Inner {
     shutdown: Option<Arc<dyn Fn() + Send + Sync>>,
     client_handles: AtomicUsize,
 }
+
+type Subscriber = (u64, Option<String>, Sender<ApiEvent>);
 
 /// Connected harness client.
 ///
@@ -353,10 +358,10 @@ impl Clone for JcodeClient {
 
 impl Drop for JcodeClient {
     fn drop(&mut self) {
-        if self.inner.client_handles.fetch_sub(1, Ordering::AcqRel) == 1 {
-            if let Some(shutdown) = &self.inner.shutdown {
-                shutdown();
-            }
+        if self.inner.client_handles.fetch_sub(1, Ordering::AcqRel) == 1
+            && let Some(shutdown) = &self.inner.shutdown
+        {
+            shutdown();
         }
     }
 }
@@ -1007,20 +1012,6 @@ impl JcodeClient {
         .map(drop)
     }
 
-    /// Schedule compaction of the transcript so far, freeing context. Not
-    /// synchronous: returning means the request was accepted.
-    pub fn compact(&self, session_id: &str) -> Result<String> {
-        match self
-            .request_ok(ApiRequest::Compact {
-                session_id: session_id.to_string(),
-            })?
-            .event
-        {
-            ApiEvent::Compacted { message, .. } => Ok(message),
-            other => Err(unexpected("compacted", &other)),
-        }
-    }
-
     /// Set a session's title. `None` restores the generated one.
     pub fn rename_session(&self, session_id: &str, title: Option<String>) -> Result<()> {
         self.request_ok(ApiRequest::RenameSession {
@@ -1326,11 +1317,7 @@ fn start_global_child(parent: &JcodeClient, control: &Arc<GlobalEventControl>, s
 /// The reader thread: correlates replies, fans stream events out.
 fn spawn_reader(inner: Arc<Inner>, mut reader: Box<dyn BufRead + Send>) {
     std::thread::spawn(move || {
-        loop {
-            let frame: ServerFrame = match read_frame(&mut reader) {
-                Ok(frame) => frame,
-                Err(_) => break,
-            };
+        while let Ok(frame) = read_frame::<_, ServerFrame>(&mut reader) {
             // Unknown kinds are skipped silently, per the protocol's
             // forward-compatibility rule.
             if matches!(frame.event, ApiEvent::Unknown) {
@@ -1398,6 +1385,9 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | ModelInfo { session_id, .. }
         | Models { session_id, .. }
         | Compacted { session_id, .. }
+        | ContextPruned { session_id, .. }
+        | ProviderReset { session_id, .. }
+        | ContextStatus { session_id, .. }
         | SessionRenamed { session_id, .. }
         | History { session_id, .. } => Some(session_id.as_str()),
         Attached { session } => Some(session.session_id.as_str()),

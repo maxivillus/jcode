@@ -341,6 +341,35 @@ test("GA methods send stable request shapes and map typed replies", async () => 
         case "clear_api_key":
           reply({ ev: "credential_updated", provider: "jcode", configured: false });
           break;
+        case "context_prune":
+          reply({
+            ev: "context_pruned",
+            session_id: request.session_id,
+            kind: request.kind,
+            message: `pruned ${request.kind}`,
+          });
+          break;
+        case "reset_provider":
+          reply({
+            ev: "provider_reset",
+            session_id: request.session_id,
+            message: "provider reset",
+          });
+          break;
+        case "get_context_status":
+          reply({
+            ev: "context_status",
+            session_id: request.session_id,
+            status: {
+              schema_version: 1,
+              revision: 9,
+              provider_generation: 4,
+              estimated_input_tokens: 512,
+              observed_input_tokens: 480,
+              fingerprint: "fp-9",
+            },
+          });
+          break;
         case "read_file":
           reply({
             ev: "file_content",
@@ -408,6 +437,18 @@ test("GA methods send stable request shapes and map typed replies", async () => 
       size: 8,
       modifiedMs: 123,
     });
+    assert.equal(await client.contextPrune("s1", "turns", 3), "pruned turns");
+    assert.equal(await client.contextPrune("s1", "tail", undefined, "m4"), "pruned tail");
+    assert.equal(await client.contextPrune("s1", "undo"), "pruned undo");
+    assert.equal(await client.resetProvider("s1"), "provider reset");
+    assert.deepEqual(await client.getContextStatus("s1"), {
+      schema_version: 1,
+      revision: 9,
+      provider_generation: 4,
+      estimated_input_tokens: 512,
+      observed_input_tokens: 480,
+      fingerprint: "fp-9",
+    });
 
     const byKind = (kind: string) => requests.find((request) => request.req === kind);
     assert.equal(byKind("list_sessions").include_archived, true);
@@ -424,6 +465,21 @@ test("GA methods send stable request shapes and map typed replies", async () => 
     assert.deepEqual(
       { path: byKind("search_text").path, limit: byKind("search_text").limit },
       { path: "src", limit: 2 },
+    );
+    assert.deepEqual(
+      {
+        kind: byKind("context_prune").kind,
+        keep_recent: byKind("context_prune").keep_recent,
+        after: byKind("context_prune").after,
+      },
+      { kind: "turns", keep_recent: 3, after: undefined },
+    );
+    const tail = requests.find(
+      (request) => request.req === "context_prune" && request.kind === "tail",
+    );
+    assert.deepEqual(
+      { kind: tail.kind, keep_recent: tail.keep_recent, after: tail.after },
+      { kind: "tail", keep_recent: undefined, after: "m4" },
     );
   } finally {
     await client.close();

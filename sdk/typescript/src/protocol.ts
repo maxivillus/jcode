@@ -8,9 +8,21 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 0;
+export const API_VERSION_MINOR = 1;
 
 export type PermissionDecision = "allow" | "allow_always" | "deny";
+
+export type ContextPruneKind = "turns" | "tail" | "undo";
+
+/** Safe aggregate context metadata returned by an explicit status query. */
+export interface ContextStatusSnapshot {
+  schema_version: number;
+  revision: number;
+  provider_generation: number;
+  estimated_input_tokens: number;
+  observed_input_tokens?: number;
+  fingerprint: string;
+}
 
 export type ErrorCode =
   | "unsupported_version"
@@ -116,6 +128,15 @@ export type ApiRequest =
   | { req: "set_model"; session_id: string; model: string }
   | { req: "set_reasoning_effort"; session_id: string; effort: string }
   | { req: "compact"; session_id: string }
+  | {
+      req: "context_prune";
+      session_id: string;
+      kind: ContextPruneKind;
+      keep_recent?: number;
+      after?: string;
+    }
+  | { req: "reset_provider"; session_id: string }
+  | { req: "get_context_status"; session_id: string }
   | { req: "rename_session"; session_id: string; title?: string }
   | { req: "rewind_undo"; session_id: string }
   | { req: "cancel_soft_interrupts"; session_id: string }
@@ -215,6 +236,9 @@ export type ApiEvent =
       modified_ms?: number;
     }
   | { ev: "compacted"; session_id: string; message: string }
+  | { ev: "context_pruned"; session_id: string; kind: ContextPruneKind; message: string }
+  | { ev: "provider_reset"; session_id: string; message: string }
+  | { ev: "context_status"; session_id: string; status: ContextStatusSnapshot }
   | {
       ev: "session_renamed";
       session_id: string;
@@ -287,6 +311,9 @@ export const KNOWN_EVENT_KINDS = [
   "text_matches",
   "file_status",
   "compacted",
+  "context_pruned",
+  "provider_reset",
+  "context_status",
   "session_renamed",
 ] as const;
 
@@ -320,6 +347,9 @@ export const KNOWN_REQUEST_KINDS = [
   "set_model",
   "set_reasoning_effort",
   "compact",
+  "context_prune",
+  "reset_provider",
+  "get_context_status",
   "rename_session",
   "rewind_undo",
   "cancel_soft_interrupts",

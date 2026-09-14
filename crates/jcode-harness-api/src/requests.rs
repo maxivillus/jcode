@@ -2,6 +2,19 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Structural context actions that an explicit user/client request may queue.
+///
+/// Provider-specific or model-only pruning kinds stay internal. Keeping this
+/// enum small prevents a public client from depending on transcript structures
+/// that are not stable API concepts.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextPruneKind {
+    Turns,
+    Tail,
+    Undo,
+}
+
 /// Curated request surface. Internally-tagged on `"req"`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "req", rename_all = "snake_case")]
@@ -173,6 +186,27 @@ pub enum ApiRequest {
     /// Without this a long-lived client eventually hits the context limit and
     /// has no recourse but to clear the conversation and lose everything.
     Compact { session_id: String },
+
+    /// Queue a user-authorized structural context prune.
+    ///
+    /// `turns` optionally keeps the requested number of recent turn groups;
+    /// `tail` requires `after` and keeps that message plus everything before it;
+    /// `undo` restores the last reversible prune and accepts no options.
+    ContextPrune {
+        session_id: String,
+        kind: ContextPruneKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keep_recent: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+    },
+
+    /// Reset the provider session and cache baseline without changing the
+    /// persisted transcript.
+    ResetProvider { session_id: String },
+
+    /// Read aggregate context status without returning transcript content.
+    GetContextStatus { session_id: String },
 
     /// Set a session's title, or clear it to restore the generated one.
     RenameSession {

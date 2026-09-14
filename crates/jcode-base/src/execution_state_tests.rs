@@ -12,6 +12,38 @@ fn new_state_has_default_schema_and_revision() {
 }
 
 #[test]
+fn prompt_summary_is_bounded_collapsed_and_redacts_sensitive_references() {
+    let mut state = ExecutionState::new("code-review").unwrap();
+    state.goal = Some("  Review\n\t the   current diff.  ".to_string());
+    state.pending = Some(vec!["Inspect changed files".to_string()]);
+    state.owner = Some("owner-that-must-not-enter-provider-prompt".to_string());
+    state.lease = Some("lease-that-must-not-enter-provider-prompt".to_string());
+    state.evidence_refs = Some(vec!["/private/evidence.log".to_string()]);
+
+    let summary = state.prompt_summary();
+
+    assert!(summary.chars().count() <= MAX_EXECUTION_STATE_PROMPT_CHARS);
+    assert!(summary.contains("goal: Review the current diff."));
+    assert!(summary.contains("pending[1]: Inspect changed files"));
+    assert!(summary.contains("evidence_count: 1"));
+    assert!(!summary.contains("owner-that-must-not-enter-provider-prompt"));
+    assert!(!summary.contains("lease-that-must-not-enter-provider-prompt"));
+    assert!(!summary.contains("/private/evidence.log"));
+}
+
+#[test]
+fn prompt_summary_clips_long_utf8_values_without_breaking_boundaries() {
+    let mut state = ExecutionState::new("code-review").unwrap();
+    state.goal = Some("ж".repeat(MAX_EXECUTION_STATE_TEXT_CHARS));
+
+    let summary = state.prompt_summary();
+
+    assert!(summary.chars().count() <= MAX_EXECUTION_STATE_PROMPT_CHARS);
+    assert!(summary.contains('…'));
+    assert!(std::str::from_utf8(summary.as_bytes()).is_ok());
+}
+
+#[test]
 fn contract_serializes_all_machine_readable_fields() {
     let state = ExecutionState::new("code-review").unwrap();
     let encoded = serde_json::to_value(state.contract()).unwrap();

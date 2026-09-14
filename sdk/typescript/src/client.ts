@@ -23,6 +23,8 @@ import {
   type AnyApiEvent,
   type ApiEvent,
   type ApiRequest,
+  type ContextPruneKind,
+  type ContextStatusSnapshot,
   type HistoryMessage,
   type ImageAttachment,
   type ModelRouteInfo,
@@ -723,6 +725,44 @@ export class JcodeClient extends EventEmitter {
   async compact(sessionId: string): Promise<string> {
     const frame = await this.expectReply({ req: "compact", session_id: sessionId }, "compacted");
     return frame.message;
+  }
+
+  /** Queue a user-authorized structural context prune. */
+  async contextPrune(
+    sessionId: string,
+    kind: ContextPruneKind,
+    keepRecent?: number,
+    after?: string,
+  ): Promise<string> {
+    const frame = await this.expectReply(
+      {
+        req: "context_prune",
+        session_id: sessionId,
+        kind,
+        keep_recent: keepRecent,
+        after,
+      },
+      "context_pruned",
+    );
+    return frame.message;
+  }
+
+  /** Reset the provider session and cache baseline without changing the transcript. */
+  async resetProvider(sessionId: string): Promise<string> {
+    const frame = await this.expectReply(
+      { req: "reset_provider", session_id: sessionId },
+      "provider_reset",
+    );
+    return frame.message;
+  }
+
+  /** Read aggregate context metadata without returning transcript content. */
+  async getContextStatus(sessionId: string): Promise<ContextStatusSnapshot> {
+    const frame = await this.expectReply(
+      { req: "get_context_status", session_id: sessionId },
+      "context_status",
+    );
+    return frame.status;
   }
 
   /** Set a session's title. Omit `title` to restore the generated one. */
