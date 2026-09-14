@@ -148,6 +148,47 @@ fn content_token_estimate(content: &[ContentBlock]) -> usize {
 }
 
 impl Agent {
+    pub(super) fn trace_context(
+        &self,
+        trace: bool,
+        plan: &ContextPreflightPlan,
+        messages: &[Message],
+        split_prompt: &SplitSystemPrompt,
+        tools: &[ToolDefinition],
+    ) {
+        if !trace {
+            return;
+        }
+        let system_prompt_estimated_tokens = split_prompt.estimated_tokens();
+        let tool_definition_estimated_tokens =
+            ToolDefinition::aggregate_prompt_token_estimate(tools);
+        let (image_count, image_estimated_tokens) = messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::Image { .. } => Some(block_token_estimate(block)),
+                _ => None,
+            })
+            .fold((0usize, 0usize), |(count, tokens), estimate| {
+                (count.saturating_add(1), tokens.saturating_add(estimate))
+            });
+        eprintln!(
+            "[trace] context_metrics revision={} estimated_input={} message_estimated={} system_prompt_estimated={} tool_definition_count={} tool_definition_estimated={} image_count={} image_estimated_tokens={} provider_context_limit={} max_input_tokens={}",
+            plan.revision.0,
+            plan.estimated_input_tokens,
+            plan.estimated_input_tokens
+                .saturating_sub(system_prompt_estimated_tokens)
+                .saturating_sub(tool_definition_estimated_tokens),
+            system_prompt_estimated_tokens,
+            tools.len(),
+            tool_definition_estimated_tokens,
+            image_count,
+            image_estimated_tokens,
+            self.provider.context_window(),
+            plan.max_input_tokens,
+        );
+    }
+
     fn refresh_static_prompt_binding(&mut self, static_part: &str) {
         let current_hash = sha256_hex(static_part.as_bytes());
         let has_provider_session =

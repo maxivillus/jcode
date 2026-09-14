@@ -9,7 +9,7 @@
 
 use crate::agent::Agent;
 use crate::context_controller::{ContextPruneKind, ContextPruneSpec};
-use crate::protocol::ServerEvent;
+use crate::protocol::{Request, ServerEvent};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
@@ -186,4 +186,28 @@ pub(super) fn handle_context_prune(
             ),
         }
     });
+}
+
+pub(super) fn handle_context_prune_request(
+    request: Request,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let Request::ContextPrune {
+        id,
+        kind,
+        keep_recent,
+        after_message_id,
+    } = request
+    else {
+        unreachable!("context prune handler received a different request");
+    };
+    handle_context_prune(
+        id,
+        &kind,
+        keep_recent,
+        after_message_id,
+        agent,
+        client_event_tx,
+    );
 }
