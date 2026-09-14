@@ -6,7 +6,10 @@ use std::time::Instant;
 
 use super::journal::{PersistVectorMode, SessionJournalEntry, metadata_requires_snapshot};
 use super::storage_paths::{file_len_or_zero, session_journal_path_from_snapshot, session_path};
-use super::{MAX_SESSION_JOURNAL_BYTES, RemoteStartupSessionSnapshot, Session, SessionStartupStub};
+use super::{
+    MAX_SESSION_JOURNAL_BYTES, RemoteStartupSessionSnapshot, Session, SessionStartupStub,
+    SessionStatus,
+};
 use crate::storage;
 
 /// Outcome of replaying one session journal file.
@@ -395,6 +398,7 @@ impl Session {
             && self.improve_mode.is_none()
             && self.rewind_undo_snapshot.is_none()
             && self.prune_undo_snapshot.is_none()
+            && self.status == SessionStatus::Active
         {
             return Ok(());
         }
