@@ -790,6 +790,32 @@ async fn prune_tool_results_keeps_tool_pairing() {
         results[0].1
     );
     assert_eq!(results[1], ("call-2".to_string(), "payload 2".to_string()));
+
+    request_action(&agent, ContextActionKind::UndoPrune);
+    agent.apply_pending_context_actions();
+
+    let restored_results: Vec<(String, String)> = agent
+        .session
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => Some((tool_use_id.clone(), content.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        restored_results,
+        vec![
+            ("call-1".to_string(), "payload 1".to_string()),
+            ("call-2".to_string(), "payload 2".to_string()),
+        ],
+        "undo must restore pruned tool-result content"
+    );
 }
 
 #[tokio::test]
