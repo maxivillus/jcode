@@ -3,10 +3,9 @@
 
 use crate::background_progress::parse_background_notification;
 use jcode_harness_api::{
-    ApiEvent, ContextPruneKind, ContextStatusSnapshot, ErrorCode, HistoryMessage, ModelRouteInfo,
-    ServerFrame, SessionInfo, TextMatch,
+    ApiEvent, ContextPruneKind, ErrorCode, HistoryMessage, ModelRouteInfo, ServerFrame,
+    SessionInfo, TextMatch,
 };
-use rusqlite::{Connection, params};
 use serde::Deserialize;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,6 +15,12 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[path = "translate_context_control.rs"]
+mod context_control;
+
+#[path = "translate_session_index.rs"]
+mod session_index;
 
 /// Default number of messages a `peek_session` returns. A preview is a glance,
 /// so this is a tail rather than a transcript: enough to recognise which
@@ -251,43 +256,6 @@ enum SimpleKind {
         provider: String,
         configured: bool,
     },
-}
-
-#[derive(Debug, Deserialize)]
-struct ContextPruneRequest {
-    kind: ContextPruneKind,
-    #[serde(default)]
-    keep_recent: Option<usize>,
-    #[serde(default)]
-    after: Option<String>,
-}
-
-fn parse_context_prune_request(request: &Value) -> Result<ContextPruneRequest, String> {
-    let mut parsed: ContextPruneRequest = serde_json::from_value(request.clone())
-        .map_err(|error| format!("invalid context_prune request: {error}"))?;
-
-    if let Some(after) = parsed.after.as_mut() {
-        *after = after.trim().to_string();
-        if after.is_empty() {
-            return Err("context_prune tail requires a non-empty `after` message id".into());
-        }
-    }
-
-    match parsed.kind {
-        ContextPruneKind::Turns if parsed.after.is_some() => {
-            Err("context_prune turns does not accept `after`".into())
-        }
-        ContextPruneKind::Tail if parsed.keep_recent.is_some() => {
-            Err("context_prune tail accepts only `after`".into())
-        }
-        ContextPruneKind::Tail if parsed.after.is_none() => {
-            Err("context_prune tail requires `after`".into())
-        }
-        ContextPruneKind::Undo if parsed.keep_recent.is_some() || parsed.after.is_some() => {
-            Err("context_prune undo does not accept `keep_recent` or `after`".into())
-        }
-        _ => Ok(parsed),
-    }
 }
 
 fn context_prune_kind_name(kind: ContextPruneKind) -> &'static str {
@@ -883,45 +851,8 @@ impl BridgeState {
                 self.pending_simple.push((id, api_id, SimpleKind::Compact));
                 vec![Outbound::Legacy(json!({"type": "compact", "id": id}))]
             }
-            "context_prune" => {
-                let parsed = match parse_context_prune_request(request) {
-                    Ok(parsed) => parsed,
-                    Err(message) => {
-                        return Self::error_reply(api_id, ErrorCode::InvalidRequest, &message);
-                    }
-                };
-                let id = self.legacy_id();
-                self.pending_simple.push((
-                    id,
-                    api_id,
-                    SimpleKind::ContextPrune { kind: parsed.kind },
-                ));
-                let mut prune = json!({
-                    "type": "context_prune",
-                    "id": id,
-                    "kind": context_prune_kind_name(parsed.kind),
-                });
-                if let Some(keep_recent) = parsed.keep_recent {
-                    prune["keep_recent"] = json!(keep_recent);
-                }
-                if let Some(after) = parsed.after {
-                    prune["after"] = json!(after);
-                }
-                vec![Outbound::Legacy(prune)]
-            }
-            "reset_provider" => {
-                let id = self.legacy_id();
-                self.pending_simple
-                    .push((id, api_id, SimpleKind::ProviderReset));
-                vec![Outbound::Legacy(
-                    json!({"type": "reset_provider", "id": id}),
-                )]
-            }
-            "get_context_status" => {
-                let id = self.legacy_id();
-                self.pending_simple
-                    .push((id, api_id, SimpleKind::ContextStatus));
-                vec![Outbound::Legacy(json!({"type": "state", "id": id}))]
+            "context_prune" | "reset_provider" | "get_context_status" => {
+                self.context_control_request(req, api_id, request)
             }
             "rename_session" => {
                 let id = self.legacy_id();
@@ -1053,42 +984,8 @@ impl BridgeState {
                         },
                     )];
                 }
-                if let Some(api_id) = self.take_simple(id, SimpleKind::ContextStatus) {
-                    let context_session_id = if session_id.is_empty() {
-                        session(self)
-                    } else {
-                        session_id
-                    };
-                    let Some(status) = event.get("context_status").cloned() else {
-                        return vec![ServerFrame::reply(
-                            api_id,
-                            ApiEvent::Error {
-                                code: ErrorCode::Internal,
-                                message: "daemon state did not include context_status".into(),
-                            },
-                        )];
-                    };
-                    let status = match serde_json::from_value::<ContextStatusSnapshot>(status) {
-                        Ok(status) => status,
-                        Err(error) => {
-                            return vec![ServerFrame::reply(
-                                api_id,
-                                ApiEvent::Error {
-                                    code: ErrorCode::Internal,
-                                    message: format!(
-                                        "daemon returned an invalid context_status snapshot: {error}"
-                                    ),
-                                },
-                            )];
-                        }
-                    };
-                    return vec![ServerFrame::reply(
-                        api_id,
-                        ApiEvent::ContextStatus {
-                            session_id: context_session_id,
-                            status,
-                        },
-                    )];
+                if let Some(frames) = self.context_control_state_event(event, &session_id) {
+                    return frames;
                 }
                 vec![]
             }
@@ -1382,52 +1279,8 @@ impl BridgeState {
                     },
                 )]
             }
-            "context_prune_result" => {
-                let id = event["id"].as_u64().unwrap_or(0);
-                let Some((api_id, kind)) = self.take_context_prune(id) else {
-                    return vec![];
-                };
-                let message = event["message"].as_str().unwrap_or("").to_string();
-                if event["success"].as_bool() == Some(false) {
-                    return vec![ServerFrame::reply(
-                        api_id,
-                        ApiEvent::Error {
-                            code: ErrorCode::InvalidRequest,
-                            message,
-                        },
-                    )];
-                }
-                vec![ServerFrame::reply(
-                    api_id,
-                    ApiEvent::ContextPruned {
-                        session_id: session(self),
-                        kind,
-                        message,
-                    },
-                )]
-            }
-            "provider_reset_result" => {
-                let id = event["id"].as_u64().unwrap_or(0);
-                let Some(api_id) = self.take_simple(id, SimpleKind::ProviderReset) else {
-                    return vec![];
-                };
-                let message = event["message"].as_str().unwrap_or("").to_string();
-                if event["success"].as_bool() == Some(false) {
-                    return vec![ServerFrame::reply(
-                        api_id,
-                        ApiEvent::Error {
-                            code: ErrorCode::InvalidRequest,
-                            message,
-                        },
-                    )];
-                }
-                vec![ServerFrame::reply(
-                    api_id,
-                    ApiEvent::ProviderReset {
-                        session_id: session(self),
-                        message,
-                    },
-                )]
+            "context_prune_result" | "provider_reset_result" => {
+                self.context_control_event(event, &session(self))
             }
             "session_renamed" => {
                 let session_id = event["session_id"]
@@ -1761,98 +1614,6 @@ impl BridgeState {
         Some(Self::jcode_home()?.join("session-metadata-v1.sqlite3"))
     }
 
-    fn recent_session_index_entries() -> Vec<RecentSessionIndexEntry> {
-        let Some(path) = Self::recent_session_index_path() else {
-            return Vec::new();
-        };
-        let Ok(connection) = Connection::open(path) else {
-            return Vec::new();
-        };
-        if connection
-            .execute_batch(
-                "PRAGMA journal_mode=WAL;
-                 PRAGMA synchronous=NORMAL;
-                 CREATE TABLE IF NOT EXISTS recent_sessions (
-                     session_id TEXT PRIMARY KEY NOT NULL,
-                     working_dir TEXT,
-                     generated_title TEXT,
-                     custom_title TEXT,
-                     todo_title TEXT,
-                     updated_at_ms INTEGER NOT NULL,
-                     last_active_at_ms INTEGER,
-                     saved INTEGER NOT NULL DEFAULT 0
-                 );
-                 CREATE INDEX IF NOT EXISTS recent_sessions_activity
-                 ON recent_sessions(COALESCE(last_active_at_ms, updated_at_ms) DESC);",
-            )
-            .is_err()
-        {
-            return Vec::new();
-        }
-        let _ = connection.execute(
-            "ALTER TABLE recent_sessions ADD COLUMN saved INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
-        let Ok(mut statement) = connection.prepare(
-            "SELECT session_id, working_dir, generated_title, custom_title,
-                    todo_title, saved, updated_at_ms, last_active_at_ms
-             FROM recent_sessions
-             ORDER BY COALESCE(last_active_at_ms, updated_at_ms) DESC
-             LIMIT 500",
-        ) else {
-            return Vec::new();
-        };
-        statement
-            .query_map([], |row| {
-                Ok(RecentSessionIndexEntry {
-                    session_id: row.get(0)?,
-                    working_dir: row.get(1)?,
-                    generated_title: row.get(2)?,
-                    custom_title: row.get(3)?,
-                    todo_title: row.get(4)?,
-                    saved: row.get(5)?,
-                    updated_at_ms: row.get(6)?,
-                    last_active_at_ms: row.get(7)?,
-                })
-            })
-            .and_then(|rows| rows.collect())
-            .unwrap_or_default()
-    }
-
-    fn write_bootstrap_recent_session_index(ids: &[(SystemTime, String)]) {
-        let Some(path) = Self::recent_session_index_path() else {
-            return;
-        };
-        let Ok(mut connection) = Connection::open(path) else {
-            return;
-        };
-        let Ok(transaction) = connection.transaction() else {
-            return;
-        };
-        for (modified, session_id) in ids.iter().take(500) {
-            let metadata = Self::resolve_session_metadata(session_id).unwrap_or_default();
-            let updated_at_ms = modified
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-                .unwrap_or_default();
-            let _ = transaction.execute(
-                "INSERT INTO recent_sessions (
-                     session_id, working_dir, generated_title, custom_title,
-                     todo_title, updated_at_ms, last_active_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5)
-                 ON CONFLICT(session_id) DO NOTHING",
-                params![
-                    session_id,
-                    metadata.working_dir,
-                    metadata.title,
-                    metadata.custom_title,
-                    updated_at_ms,
-                ],
-            );
-        }
-        let _ = transaction.commit();
-    }
-
     fn stored_session_ids(limit: Option<usize>) -> Vec<String> {
         let indexed = Self::recent_session_index_entries();
         if !indexed.is_empty() && limit.is_some_and(|limit| indexed.len() >= limit) {
@@ -1910,7 +1671,9 @@ impl BridgeState {
                 .collect::<Vec<_>>()
         });
         ids.sort_unstable_by_key(|(modified, _)| Reverse(*modified));
-        Self::write_bootstrap_recent_session_index(&ids);
+        if Self::write_bootstrap_recent_session_index(&ids).is_err() {
+            eprintln!("harness API bridge: unable to update recent session index");
+        }
         if let Some(limit) = limit {
             ids.truncate(limit);
         }

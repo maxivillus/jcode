@@ -611,7 +611,7 @@ impl Tool for ContextControlTool {
                         "kind": {
                             "type": "string",
                             "enum": ["images", "memory-injections", "system-reminders", "tool-results", "turns", "tail"],
-                            "description": "Structural data to prune. `turns` and `tail` erase whole structural units: preview projects them, but only an explicit user command (/context prune) can queue them.",
+                            "description": "Data kind to prune; `turns` and `tail` require an explicit user command.",
                         },
                         "keep_recent": {
                             "type": "integer",

@@ -13,9 +13,9 @@
 use crate::errors::{Error, ErrorKind, Result};
 use crate::launch::{LaunchOptions, LaunchedInstance, ensure_runtime, launch_instance};
 use jcode_harness_api::{
-    API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, ContextPruneKind, ContextStatusSnapshot,
-    HistoryMessage, ModelRouteInfo, PermissionDecision, ServerFrame, SessionInfo, TextMatch,
-    api_socket_path, read_frame, write_frame,
+    API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, HistoryMessage, ModelRouteInfo,
+    PermissionDecision, ServerFrame, SessionInfo, TextMatch, api_socket_path, read_frame,
+    write_frame,
 };
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -25,6 +25,9 @@ use std::sync::mpsc::{
 };
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
+
+#[path = "client_context_control.rs"]
+mod context_control;
 
 /// How a client reaches the harness.
 pub struct ConnectOptions {
@@ -105,9 +108,9 @@ impl Transport for UnixTransport {
         #[cfg(unix)]
         {
             let socket = self.0.try_clone().ok()?;
-            return Some(Arc::new(move || {
+            Some(Arc::new(move || {
                 let _ = socket.shutdown(std::net::Shutdown::Both);
-            }));
+            }))
         }
         #[cfg(windows)]
         {
@@ -311,7 +314,7 @@ struct Inner {
     /// Requests waiting for their `reply_to` frame.
     pending: Mutex<HashMap<u64, Sender<ServerFrame>>>,
     /// Live subscriptions: (id, session filter, sink).
-    subscribers: Mutex<Vec<(u64, Option<String>, Sender<ApiEvent>)>>,
+    subscribers: Mutex<Vec<Subscriber>>,
     next_id: AtomicU64,
     next_sub: AtomicU64,
     closed: AtomicBool,
@@ -322,6 +325,8 @@ struct Inner {
     shutdown: Option<Arc<dyn Fn() + Send + Sync>>,
     client_handles: AtomicUsize,
 }
+
+type Subscriber = (u64, Option<String>, Sender<ApiEvent>);
 
 /// Connected harness client.
 ///
@@ -353,10 +358,10 @@ impl Clone for JcodeClient {
 
 impl Drop for JcodeClient {
     fn drop(&mut self) {
-        if self.inner.client_handles.fetch_sub(1, Ordering::AcqRel) == 1 {
-            if let Some(shutdown) = &self.inner.shutdown {
-                shutdown();
-            }
+        if self.inner.client_handles.fetch_sub(1, Ordering::AcqRel) == 1
+            && let Some(shutdown) = &self.inner.shutdown
+        {
+            shutdown();
         }
     }
 }
@@ -1007,74 +1012,6 @@ impl JcodeClient {
         .map(drop)
     }
 
-    /// Schedule compaction of the transcript so far, freeing context. Not
-    /// synchronous: returning means the request was accepted.
-    pub fn compact(&self, session_id: &str) -> Result<String> {
-        match self
-            .request_ok(ApiRequest::Compact {
-                session_id: session_id.to_string(),
-            })?
-            .event
-        {
-            ApiEvent::Compacted { message, .. } => Ok(message),
-            other => Err(unexpected("compacted", &other)),
-        }
-    }
-
-    /// Queue a user-authorized structural context prune.
-    ///
-    /// `turns` may keep a requested number of recent turn groups, `tail`
-    /// requires `after` and keeps that message plus everything before it, and
-    /// `undo` restores the last reversible prune. The bridge validates which
-    /// optional arguments are valid for the selected kind.
-    pub fn context_prune(
-        &self,
-        session_id: &str,
-        kind: ContextPruneKind,
-        keep_recent: Option<usize>,
-        after: Option<String>,
-    ) -> Result<String> {
-        match self
-            .request_ok(ApiRequest::ContextPrune {
-                session_id: session_id.to_string(),
-                kind,
-                keep_recent,
-                after,
-            })?
-            .event
-        {
-            ApiEvent::ContextPruned { message, .. } => Ok(message),
-            other => Err(unexpected("context_pruned", &other)),
-        }
-    }
-
-    /// Reset the provider session and cache baseline without changing the
-    /// persisted transcript.
-    pub fn reset_provider(&self, session_id: &str) -> Result<String> {
-        match self
-            .request_ok(ApiRequest::ResetProvider {
-                session_id: session_id.to_string(),
-            })?
-            .event
-        {
-            ApiEvent::ProviderReset { message, .. } => Ok(message),
-            other => Err(unexpected("provider_reset", &other)),
-        }
-    }
-
-    /// Read aggregate context metadata without returning transcript content.
-    pub fn get_context_status(&self, session_id: &str) -> Result<ContextStatusSnapshot> {
-        match self
-            .request_ok(ApiRequest::GetContextStatus {
-                session_id: session_id.to_string(),
-            })?
-            .event
-        {
-            ApiEvent::ContextStatus { status, .. } => Ok(status),
-            other => Err(unexpected("context_status", &other)),
-        }
-    }
-
     /// Set a session's title. `None` restores the generated one.
     pub fn rename_session(&self, session_id: &str, title: Option<String>) -> Result<()> {
         self.request_ok(ApiRequest::RenameSession {
@@ -1380,11 +1317,7 @@ fn start_global_child(parent: &JcodeClient, control: &Arc<GlobalEventControl>, s
 /// The reader thread: correlates replies, fans stream events out.
 fn spawn_reader(inner: Arc<Inner>, mut reader: Box<dyn BufRead + Send>) {
     std::thread::spawn(move || {
-        loop {
-            let frame: ServerFrame = match read_frame(&mut reader) {
-                Ok(frame) => frame,
-                Err(_) => break,
-            };
+        while let Ok(frame) = read_frame::<_, ServerFrame>(&mut reader) {
             // Unknown kinds are skipped silently, per the protocol's
             // forward-compatibility rule.
             if matches!(frame.event, ApiEvent::Unknown) {

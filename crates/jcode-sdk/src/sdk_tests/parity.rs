@@ -89,7 +89,7 @@ fn the_rust_sdk_implements_every_shared_capability() {
     assert!(
         missing.is_empty(),
         "the shared SDK surface names capabilities the Rust SDK does not have: \
-         {missing:?}. Implement them in client.rs, or remove them from \
+         {missing:?}. Implement them in the Rust SDK source, or remove them from \
          CAPABILITIES if the capability is being dropped from both SDKs."
     );
 }
@@ -186,7 +186,7 @@ const TS_ONLY: &[(&str, &str)] = &[("close", "Rust closes through Drop")];
 
 fn rust_client_source() -> String {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    ["client.rs", "structured.rs"]
+    ["client.rs", "client_context_control.rs", "structured.rs"]
         .into_iter()
         .map(|file| {
             std::fs::read_to_string(root.join(file)).unwrap_or_else(|error| {
