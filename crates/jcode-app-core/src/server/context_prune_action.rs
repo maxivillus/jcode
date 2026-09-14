@@ -90,7 +90,18 @@ pub(super) fn handle_context_prune(
             return;
         }
     } else {
-        match prune_kind.expect("non-undo request must have a prune kind") {
+        let Some(prune_kind) = prune_kind else {
+            send_result(
+                client_event_tx,
+                id,
+                format!(
+                    "Обрезка `{requested}` недоступна пользовательской команде; доступно: turns, tail, undo"
+                ),
+                false,
+            );
+            return;
+        };
+        match prune_kind {
             ContextPruneKind::Turns if after_message_id.is_some() => {
                 send_result(
                     client_event_tx,
@@ -130,7 +141,10 @@ pub(super) fn handle_context_prune(
             if undo {
                 agent_guard.queue_user_prune_undo()
             } else {
-                let kind = prune_kind.expect("validated prune kind");
+                let Some(kind) = prune_kind else {
+                    crate::logging::warn("Validated context prune request lost its prune kind");
+                    return;
+                };
                 let mut spec = ContextPruneSpec::new(kind);
                 match kind {
                     ContextPruneKind::Tail => {
@@ -143,7 +157,12 @@ pub(super) fn handle_context_prune(
                             spec = spec.keep_recent(keep_recent);
                         }
                     }
-                    _ => unreachable!("user_prune_kind only returns user-only kinds"),
+                    _ => {
+                        crate::logging::warn(
+                            "Validated context prune request has an unsupported kind",
+                        );
+                        return;
+                    }
                 }
                 agent_guard.queue_user_prune(spec)
             }
