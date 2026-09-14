@@ -158,7 +158,6 @@ impl Agent {
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split(None);
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
-
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
@@ -203,20 +202,19 @@ impl Agent {
                 }
                 messages_with_memory.push(memory_msg);
             }
-
             logging::info(&format!(
                 "API call starting: {} messages, {} tools",
                 messages_with_memory.len(),
                 tools.len()
             ));
             let api_start = Instant::now();
-
             let stamped = crate::config::config()
                 .features
                 .message_timestamps
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let context_plan = self.prepare_context_preflight(send_messages, &tools, &split_prompt);
+            self.trace_context(trace, &context_plan, send_messages, &split_prompt, &tools);
             let context_revision = context_plan.revision;
             if context_plan.needs_compaction()
                 && self.try_auto_compact_after_context_limit("context length preflight exceeded")
@@ -243,18 +241,9 @@ impl Agent {
             let model_at_request_start = provider.model().to_string();
             let resume_session_id = self.provider_session_id.clone();
             self.last_status_detail = None;
-            let _ = event_tx.send(kv_cache_request_event(
-                &cache_signature_messages,
-                &tools,
-                &split_prompt.static_part,
-                &ephemeral_signature_messages,
-            ));
-            // These vectors are only needed to build the cache telemetry event.
-            // Explicitly release their deeply cloned transcript strings before
-            // waiting for the provider stream.
-            drop(cache_signature_messages);
-            drop(ephemeral_signature_messages);
-            let mut keepalive = stream_keepalive_ticker();
+            if !self.final_provider_revision_gate(context_revision) {
+                continue;
+            }
             let mut stream = {
                 let mut complete_future = std::pin::pin!(provider.complete_split(
                     send_messages,
@@ -263,6 +252,18 @@ impl Agent {
                     &split_prompt.dynamic_part,
                     resume_session_id.as_deref(),
                 ));
+                let _ = event_tx.send(kv_cache_request_event(
+                    &cache_signature_messages,
+                    &tools,
+                    &split_prompt.static_part,
+                    &ephemeral_signature_messages,
+                ));
+                // These vectors are only needed to build the cache telemetry event.
+                // Explicitly release their deeply cloned transcript strings before
+                // waiting for the provider stream.
+                drop(cache_signature_messages);
+                drop(ephemeral_signature_messages);
+                let mut keepalive = stream_keepalive_ticker();
                 loop {
                     tokio::select! {
                         _ = keepalive.tick() => {
@@ -309,7 +310,6 @@ impl Agent {
                     }
                 }
             };
-
             // `complete_split` has consumed the request and returned an owned
             // response stream. Keeping these full transcript snapshots alive
             // while tokens arrive needlessly multiplies active-session memory.

@@ -85,27 +85,54 @@ impl ClaudeProvider {
         names
     }
 
-    fn extract_user_prompt(&self, messages: &[Message]) -> Result<String> {
+    fn extract_user_prompt(&self, messages: &[Message]) -> Result<Value> {
         for msg in messages.iter().rev() {
             if msg.role != Role::User {
                 continue;
             }
-            let mut parts = Vec::new();
+            let mut text_parts = Vec::new();
+            let mut content_blocks = Vec::new();
+            let mut has_image = false;
             for block in &msg.content {
                 match block {
-                    ContentBlock::Text { text, .. } => parts.push(text.clone()),
-                    ContentBlock::ToolResult { content, .. } => parts.push(content.clone()),
+                    ContentBlock::Text { text, .. } => {
+                        text_parts.push(text.clone());
+                        content_blocks.push(json!({
+                            "type": "text",
+                            "text": text,
+                        }));
+                    }
+                    ContentBlock::ToolResult { content, .. } => {
+                        text_parts.push(content.clone());
+                        content_blocks.push(json!({
+                            "type": "text",
+                            "text": content,
+                        }));
+                    }
                     ContentBlock::ToolUse { .. } => {}
                     ContentBlock::Reasoning { .. }
                     | ContentBlock::ReasoningTrace { .. }
                     | ContentBlock::AnthropicThinking { .. }
                     | ContentBlock::OpenAIReasoning { .. } => {}
-                    ContentBlock::Image { .. } => {}
+                    ContentBlock::Image { media_type, data } => {
+                        has_image = true;
+                        content_blocks.push(json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": data,
+                            },
+                        }));
+                    }
                     ContentBlock::OpenAICompaction { .. } => {}
                 }
             }
-            if !parts.is_empty() {
-                return Ok(parts.join("\n\n"));
+            if !content_blocks.is_empty() {
+                if has_image {
+                    return Ok(Value::Array(content_blocks));
+                }
+                return Ok(Value::String(text_parts.join("\n\n")));
             }
         }
         anyhow::bail!("No user prompt found for Claude CLI request");
@@ -637,7 +664,7 @@ impl Provider for ClaudeProvider {
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let tool_names = self.tool_names_for_cli(tools);
-        let prompt = self.extract_user_prompt(messages)?;
+        let prompt_content = self.extract_user_prompt(messages)?;
         let current_model = self
             .model
             .read()
@@ -648,7 +675,7 @@ impl Provider for ClaudeProvider {
         let resume = resume_session_id.map(|s| s.to_string());
         let cwd = std::env::current_dir().ok();
 
-        let prompt_items = vec![Value::String(prompt.clone())];
+        let prompt_items = vec![prompt_content.clone()];
         let system_value =
             (!system_prompt.trim().is_empty()).then(|| Value::String(system_prompt.clone()));
         let tool_names_value = Value::Array(
@@ -660,7 +687,7 @@ impl Provider for ClaudeProvider {
         let payload = json!({
             "model": &current_model,
             "system": system_value.as_ref(),
-            "prompt": &prompt,
+            "prompt": &prompt_content,
             "tool_names": &tool_names,
             "resume_present": resume.is_some(),
         });
@@ -735,7 +762,7 @@ impl Provider for ClaudeProvider {
                     tool_names.clone(),
                     system_prompt.clone(),
                     resume.clone(),
-                    prompt.clone(),
+                    prompt_content.clone(),
                     cwd.clone(),
                     tx.clone(),
                 )
@@ -868,6 +895,10 @@ impl Provider for ClaudeProvider {
         "claude"
     }
 
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         let model = self.model();
         let config = self.config.clone();
@@ -892,7 +923,7 @@ async fn run_claude_cli(
     tool_names: Vec<String>,
     system: String,
     resume_session_id: Option<String>,
-    prompt: String,
+    prompt: Value,
     cwd: Option<PathBuf>,
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<()> {
@@ -1140,3 +1171,6 @@ fn to_internal_tool_name(name: &str) -> String {
     }
     .to_string()
 }
+
+#[cfg(test)]
+mod tests;

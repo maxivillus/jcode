@@ -91,7 +91,6 @@ impl Agent {
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split(None);
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
-
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
@@ -123,27 +122,25 @@ impl Agent {
                 batch_nudge_pending = false;
                 sequential_single_tool_rounds = 0;
             }
-
             logging::info(&format!(
                 "API call starting: {} messages, {} tools",
                 messages_with_memory.len(),
                 tools.len()
             ));
             let api_start = Instant::now();
-
             // Publish status for TUI to show during Task execution
             Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
                 session_id: self.session.id.clone(),
                 status: "calling API".to_string(),
                 model: Some(self.provider.model()),
             }));
-
             let stamped = crate::config::config()
                 .features
                 .message_timestamps
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let context_plan = self.prepare_context_preflight(send_messages, &tools, &split_prompt);
+            self.trace_context(trace, &context_plan, send_messages, &split_prompt, &tools);
             let context_revision = context_plan.revision;
             if context_plan.needs_compaction()
                 && self.try_auto_compact_after_context_limit("context length preflight exceeded")
@@ -160,6 +157,9 @@ impl Agent {
             }
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.last_status_detail = None;
+            if !self.final_provider_revision_gate(context_revision) {
+                continue;
+            }
             let mut stream = match self
                 .provider
                 .complete_split(

@@ -33,6 +33,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
+mod context_state;
 mod crash;
 mod journal;
 mod load_telemetry;
@@ -42,6 +43,7 @@ mod model;
 mod persistence;
 mod render;
 mod storage_paths;
+pub use context_state::SessionUndoSnapshot;
 pub use crash::{
     CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
     find_session_by_name_or_id, recover_crashed_sessions, recover_crashed_sessions_by_ids,
@@ -118,6 +120,12 @@ pub struct Session {
     /// Provider-specific session ID (e.g., Claude Code CLI session for resume)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_id: Option<String>,
+    /// One-step rewind state persisted with the session snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewind_undo_snapshot: Option<SessionUndoSnapshot>,
+    /// One-step context-prune state persisted with the session snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prune_undo_snapshot: Option<SessionUndoSnapshot>,
     /// Stable provider/profile key for session-source filtering (e.g. "openai",
     /// "opencode", "opencode-go").
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -361,6 +369,8 @@ impl Session {
         session.messages = snapshot.messages;
         session.compaction = snapshot.compaction;
         session.provider_session_id = snapshot.provider_session_id;
+        session.rewind_undo_snapshot = snapshot.rewind_undo_snapshot;
+        session.prune_undo_snapshot = snapshot.prune_undo_snapshot;
         session.provider_key = snapshot.provider_key;
         session.model = snapshot.model;
         session.route_api_method = snapshot.route_api_method;
@@ -739,6 +749,8 @@ impl Session {
             messages: Vec::new(),
             compaction: None,
             provider_session_id: None,
+            rewind_undo_snapshot: None,
+            prune_undo_snapshot: None,
             provider_key: None,
             model: None,
             route_api_method: None,
@@ -793,6 +805,8 @@ impl Session {
             messages: Vec::new(),
             compaction: None,
             provider_session_id: None,
+            rewind_undo_snapshot: None,
+            prune_undo_snapshot: None,
             provider_key: None,
             model: None,
             route_api_method: None,
@@ -1112,70 +1126,6 @@ request in this new forked session, using the inherited conversation only as con
         } else {
             false
         }
-    }
-
-    pub fn redacted_for_export(&self) -> Self {
-        let mut redacted = self.clone();
-        if let Some(title) = redacted.title.as_mut() {
-            *title = crate::message::redact_secrets(title);
-        }
-        if let Some(title) = redacted.custom_title.as_mut() {
-            *title = crate::message::redact_secrets(title);
-        }
-        if let Some(compaction) = redacted.compaction.as_mut() {
-            compaction.summary_text = crate::message::redact_secrets(&compaction.summary_text);
-        }
-        for msg in &mut redacted.messages {
-            for block in &mut msg.content {
-                match block {
-                    ContentBlock::Text { text, .. }
-                    | ContentBlock::Reasoning { text }
-                    | ContentBlock::ReasoningTrace { text } => {
-                        *text = crate::message::redact_secrets(text);
-                    }
-                    ContentBlock::AnthropicThinking { thinking, .. } => {
-                        *thinking = crate::message::redact_secrets(thinking);
-                    }
-                    ContentBlock::OpenAIReasoning { summary, .. } => {
-                        for item in summary {
-                            *item = crate::message::redact_secrets(item);
-                        }
-                    }
-                    ContentBlock::ToolResult { content, .. } => {
-                        *content = crate::message::redact_secrets(content);
-                    }
-                    ContentBlock::ToolUse { input, .. } => redact_json_value(input),
-                    ContentBlock::Image { .. } => {}
-                    ContentBlock::OpenAICompaction { .. } => {}
-                }
-            }
-        }
-        for event in &mut redacted.replay_events {
-            match &mut event.kind {
-                StoredReplayEventKind::DisplayMessage { title, content, .. } => {
-                    if let Some(title) = title.as_mut() {
-                        *title = crate::message::redact_secrets(title);
-                    }
-                    *content = crate::message::redact_secrets(content);
-                }
-                StoredReplayEventKind::SwarmStatus { members } => {
-                    for member in members {
-                        if let Some(detail) = member.detail.as_mut() {
-                            *detail = crate::message::redact_secrets(detail);
-                        }
-                    }
-                }
-                StoredReplayEventKind::SwarmPlan { items, reason, .. } => {
-                    if let Some(reason) = reason.as_mut() {
-                        *reason = crate::message::redact_secrets(reason);
-                    }
-                    for item in items {
-                        item.content = crate::message::redact_secrets(&item.content);
-                    }
-                }
-            }
-        }
-        redacted
     }
 
     pub fn token_usage_totals(&self) -> crate::protocol::TokenUsageTotals {
@@ -1532,6 +1482,8 @@ request in this new forked session, using the inherited conversation only as con
     pub fn strip_transcript_for_remote_client(&mut self) {
         self.messages.clear();
         self.compaction = None;
+        self.rewind_undo_snapshot = None;
+        self.prune_undo_snapshot = None;
         self.env_snapshots.clear();
         self.memory_injections.clear();
         self.replay_events.clear();
@@ -1555,45 +1507,6 @@ request in this new forked session, using the inherited conversation only as con
     }
 }
 
-fn redact_json_value(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::String(s) => {
-            *s = crate::message::redact_secrets(s);
-        }
-        serde_json::Value::Array(values) => {
-            for entry in values {
-                redact_json_value(entry);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            for (key, entry) in map.iter_mut() {
-                if is_sensitive_json_key(key) {
-                    *entry = serde_json::Value::String("[REDACTED_SECRET]".to_string());
-                } else {
-                    redact_json_value(entry);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn is_sensitive_json_key(key: &str) -> bool {
-    let normalized = key
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    normalized.contains("apikey")
-        || normalized.ends_with("token")
-        || normalized.ends_with("secret")
-        || normalized.contains("password")
-        || matches!(
-            normalized.as_str(),
-            "authorization" | "cookie" | "setcookie" | "privatekey" | "clientsecret"
-        )
-}
-
 #[derive(Debug, Deserialize)]
 struct RemoteStartupSessionSnapshot {
     id: String,
@@ -1611,6 +1524,10 @@ struct RemoteStartupSessionSnapshot {
     compaction: Option<StoredCompactionState>,
     #[serde(default)]
     provider_session_id: Option<String>,
+    #[serde(default)]
+    rewind_undo_snapshot: Option<SessionUndoSnapshot>,
+    #[serde(default)]
+    prune_undo_snapshot: Option<SessionUndoSnapshot>,
     #[serde(default)]
     provider_key: Option<String>,
     #[serde(default)]

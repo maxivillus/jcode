@@ -7,6 +7,7 @@ include!("tests/commands_accounts_02/part_01.rs");
 include!("tests/commands_accounts_02/part_02.rs");
 include!("tests/state_model_poke_01/part_01.rs");
 include!("tests/state_model_poke_01/part_02.rs");
+include!("tests/state_model_poke_01/part_03.rs");
 include!("tests/state_model_poke_02/part_01.rs");
 include!("tests/state_model_poke_02/part_02.rs");
 include!("tests/state_model_poke_03.rs");
@@ -63,7 +64,6 @@ fn kv_cache_signature_prefix_match_allows_appended_messages() {
     ];
     let mut current_messages = baseline_messages.clone();
     current_messages.push(crate::message::Message::user("follow up"));
-
     let baseline = App::kv_cache_request_signature(&baseline_messages, &[], "system", "memory a");
     let current = App::kv_cache_request_signature(&current_messages, &[], "system", "memory b");
 

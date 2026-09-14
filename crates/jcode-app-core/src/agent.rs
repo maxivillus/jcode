@@ -36,7 +36,9 @@ use crate::message::{
 };
 use crate::protocol::{HistoryMessage, ServerEvent};
 use crate::provider::{NativeToolResult, Provider, ProviderRuntimeState};
-use crate::session::{GitState, Session, SessionStatus, StoredDisplayRole, StoredMessage};
+use crate::session::{
+    GitState, Session, SessionStatus, SessionUndoSnapshot, StoredDisplayRole, StoredMessage,
+};
 use crate::skill::SkillRegistry;
 use crate::tool::{Registry, ToolContext, ToolExecutionMode};
 use anyhow::Result;
@@ -173,14 +175,6 @@ pub struct TokenUsage {
     pub cache_creation_input_tokens: Option<u64>,
 }
 
-#[derive(Debug, Clone)]
-struct RewindUndoSnapshot {
-    messages: Vec<StoredMessage>,
-    provider_session_id: Option<String>,
-    session_provider_session_id: Option<String>,
-    visible_message_count: usize,
-}
-
 pub struct Agent {
     provider: Arc<dyn Provider>,
     registry: Registry,
@@ -254,10 +248,6 @@ pub struct Agent {
     last_provider_components_fingerprint: Option<String>,
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
-    /// One-step undo snapshot captured before the most recent rewind.
-    rewind_undo_snapshot: Option<RewindUndoSnapshot>,
-    /// История и provider-сессия до последней обратимой обрезки контекста.
-    prune_undo_snapshot: Option<context_prune::ContextPruneUndoSnapshot>,
     /// Момент последней мутации транскрипта (rewind, prune, compact).
     ///
     /// Память, посчитанная до этой мутации, описывает уже несуществующий
@@ -346,8 +336,6 @@ impl Agent {
             last_provider_static_prompt_hash: None,
             last_provider_components_fingerprint: None,
             memory_enabled: crate::config::config().features.memory,
-            rewind_undo_snapshot: None,
-            prune_undo_snapshot: None,
             last_transcript_mutation_at: None,
             stdin_request_tx: None,
             provider_runtime_state: ProviderRuntimeState::observed(initial_provider_model),
@@ -651,7 +639,6 @@ impl Agent {
         self.mcp_late_register_resolved = false;
         self.last_provider_static_prompt_hash = None;
         self.last_provider_components_fingerprint = None;
-        self.rewind_undo_snapshot = None;
     }
 
     /// Synchronize the remote client's selected skill, accepting only names
@@ -1144,6 +1131,9 @@ fn clear_stale_stream_text(event_tx: &mpsc::UnboundedSender<ServerEvent>) {
 
 #[cfg(test)]
 mod context_action_tests;
+
+#[cfg(test)]
+mod context_evidence_tests;
 
 #[cfg(test)]
 mod context_prune_system_reminder_tests;

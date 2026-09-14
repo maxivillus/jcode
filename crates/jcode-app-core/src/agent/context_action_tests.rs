@@ -137,7 +137,7 @@ fn tail_forecast(agent: &Agent, after: &str) -> Option<ContextPruneForecast> {
 
 /// Поднимает revision контекста так же, как preflight перед запросом:
 /// меняются hashes компонентов, поэтому revision увеличивается.
-fn bump_context_revision(agent: &Agent, skills: &str) -> ContextRevision {
+pub(super) fn bump_context_revision(agent: &Agent, skills: &str) -> ContextRevision {
     let budget = ContextBudget {
         provider_context_limit: 100_000,
         reserved_output_tokens: 1_000,
@@ -1194,3 +1194,6 @@ async fn user_command_queues_a_turn_prune_and_its_undo() {
         "the user undo must restore the transcript"
     );
 }
+
+#[path = "context_action_reload_tests.rs"]
+mod context_action_reload_tests;

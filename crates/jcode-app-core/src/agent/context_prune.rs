@@ -6,11 +6,10 @@ use crate::context_controller::{
     MAX_PROJECTION_LEVELS,
 };
 use crate::message::{ContentBlock, Message, Role};
-use crate::session::StoredMessage;
+use crate::session::{SessionUndoSnapshot, StoredMessage};
 use crate::tool_pairing::{balanced_prefix_ends, balanced_suffix_start, first_gap};
 
-/// Начало сообщения memory-инъекции, как его собирает `memory_injection_message`.
-const MEMORY_INJECTION_MARKER: &str = "<system-reminder>\n# Memory\n";
+use super::context_control::MEMORY_INJECTION_MARKER;
 /// Тег системного напоминания харнесса.
 const SYSTEM_REMINDER_PREFIX: &str = "<system-reminder>";
 /// Заметка, которой заменяется удалённое изображение.
@@ -388,14 +387,6 @@ fn build_prune_projection(
     }
 }
 
-/// История и provider-сессия до обратимой обрезки контекста.
-#[derive(Clone)]
-pub(super) struct ContextPruneUndoSnapshot {
-    messages: Vec<StoredMessage>,
-    provider_session_id: Option<String>,
-    session_provider_session_id: Option<String>,
-}
-
 impl Agent {
     /// Структурная обрезка контекста по явному запросу модели.
     ///
@@ -409,10 +400,11 @@ impl Agent {
         spec: ContextPruneSpec,
     ) -> ContextActionOutcome {
         let before_tokens = self.provider_token_estimate();
-        let snapshot = ContextPruneUndoSnapshot {
+        let snapshot = SessionUndoSnapshot {
             messages: self.session.messages.clone(),
             provider_session_id: self.provider_session_id.clone(),
             session_provider_session_id: self.session.provider_session_id.clone(),
+            visible_message_count: 0,
         };
 
         let pruned = self.apply_prune(&spec);
@@ -437,7 +429,7 @@ impl Agent {
             };
         }
 
-        self.prune_undo_snapshot = Some(snapshot);
+        self.session.prune_undo_snapshot = Some(snapshot);
         self.session.updated_at = chrono::Utc::now();
         self.invalidate_provider_context("context prune");
         self.locked_tools = None;
@@ -487,7 +479,7 @@ impl Agent {
 
     /// Возвращает историю и provider-сессию к состоянию до последней обрезки.
     pub(super) fn undo_prune_for_model_request(&mut self) -> ContextActionOutcome {
-        let Some(snapshot) = self.prune_undo_snapshot.take() else {
+        let Some(snapshot) = self.session.prune_undo_snapshot.take() else {
             return ContextActionOutcome::Skipped {
                 reason: "no context prune to undo".to_string(),
             };

@@ -101,12 +101,12 @@ pub enum Request {
         kind: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         keep_recent: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none", rename = "after")]
+        after_message_id: Option<String>,
     },
-
     /// Health check
     #[serde(rename = "ping")]
     Ping { id: u64 },
-
     /// Get current state (debug)
     #[serde(rename = "state")]
     GetState { id: u64 },

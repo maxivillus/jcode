@@ -259,7 +259,7 @@ impl Agent {
         }
 
         let removed = message_count - message_index;
-        self.rewind_undo_snapshot = Some(RewindUndoSnapshot {
+        self.session.rewind_undo_snapshot = Some(SessionUndoSnapshot {
             messages: self.session.messages.clone(),
             provider_session_id: self.provider_session_id.clone(),
             session_provider_session_id: self.session.provider_session_id.clone(),
@@ -278,7 +278,7 @@ impl Agent {
     }
 
     pub fn undo_rewind(&mut self) -> Result<usize, String> {
-        let Some(snapshot) = self.rewind_undo_snapshot.take() else {
+        let Some(snapshot) = self.session.rewind_undo_snapshot.take() else {
             return Err("No rewind to undo.".to_string());
         };
 
