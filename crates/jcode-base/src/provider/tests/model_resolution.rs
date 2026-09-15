@@ -2031,9 +2031,7 @@ fn test_context_limit_dynamic_cache() {
     assert_eq!(context_limit_for_model("test-model-xyz"), Some(64_000));
 }
 
-// --- Migrated from the OpenRouter runtime tests: these exercise MultiProvider
-// --- routing/identity with a real OpenRouter runtime via the registry.
-
+// --- Migrated from OpenRouter runtime tests: exercise MultiProvider routing/identity with a real runtime via the registry.
 struct OrEnvVarGuard {
     key: &'static str,
     previous: Option<std::ffi::OsString>,
@@ -2062,7 +2060,6 @@ impl Drop for OrEnvVarGuard {
         }
     }
 }
-
 fn isolate_openrouter_autodetect_env_or() -> Vec<OrEnvVarGuard> {
     let mut guards = vec![
         OrEnvVarGuard::remove("JCODE_OPENROUTER_API_BASE"),
@@ -2101,7 +2098,6 @@ fn isolate_openrouter_autodetect_env_or() -> Vec<OrEnvVarGuard> {
     );
     guards
 }
-
 fn spawn_single_response_chat_server_or() -> (String, std::sync::mpsc::Receiver<String>) {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake provider server");

@@ -1,5 +1,5 @@
 use super::*;
-
+include!("provider_catalog_context_tests.rs");
 #[test]
 fn conifer_static_fallback_contains_the_issue_catalog() {
     let profile = openai_compatible_profile_by_id("conifer").expect("Conifer profile");
@@ -1207,41 +1207,6 @@ fn open_weight_family_context_limits_match_published_windows() {
     assert_eq!(f("gpt-oss-120b"), Some(131_072));
     assert_eq!(f("llama-3.3-70b-instruct"), Some(131_072));
     assert_eq!(f("sonar-pro"), Some(128_000));
-
-    // Conifer's static catalog includes these newer families and aliases.
-    for (model, expected) in [
-        ("grok-4.3", 1_000_000),
-        ("grok-4.5", 500_000),
-        ("grok-4.6", 500_000),
-        ("seed-2.0-pro", 256_000),
-        ("seed-2.0-code", 256_000),
-        ("seed-2.0-mini", 256_000),
-        ("step-3.7-flash", 262_144),
-        ("step-3.7-flash-novita", 262_144),
-        ("hy3", 262_144),
-        ("hy3-tencent", 262_144),
-        ("hy3-novita", 262_144),
-        ("ling-3.0-flash", 131_072),
-        ("inkling", 524_288),
-        ("inkling-small", 524_288),
-        ("nemotron-3-ultra", 262_144),
-        ("nemotron-3-ultra-together", 262_144),
-        ("nemotron-3-super-120b", 262_144),
-        ("nemotron-3.5-lightning", 262_144),
-        ("mistral-large-latest", 256_000),
-        ("mistral-medium-latest", 256_000),
-        ("mistral-small-latest", 256_000),
-        ("command-a-cohere", 256_000),
-        ("llama-4-maverick", 1_048_576),
-        ("llama-4-scout", 327_680),
-        ("gemma-4-31b", 128_000),
-    ] {
-        assert_eq!(
-            f(model),
-            Some(expected),
-            "unexpected context window for {model}"
-        );
-    }
 
     // Unknown families stay unresolved so the dynamic cache/default can act.
     assert_eq!(f("some-unknown-model"), None);
