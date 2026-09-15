@@ -169,6 +169,19 @@ impl Agent {
             "Context limit exceeded; auto-compacted and retrying (dropped {} messages, usage was {:.1}%)",
             dropped, usage_pct
         ));
+        crate::logging::event_info(
+            "CONTEXT_COMPACTION_RECOVERY",
+            vec![
+                ("mode".to_string(), "context_limit_auto".to_string()),
+                ("status".to_string(), "applied".to_string()),
+                ("dropped_messages".to_string(), dropped.to_string()),
+                ("usage_percent".to_string(), format!("{usage_pct:.1}")),
+                (
+                    "context_limit_tokens".to_string(),
+                    context_limit.to_string(),
+                ),
+            ],
+        );
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
                 "auto_compaction_applied",
@@ -287,6 +300,13 @@ impl Agent {
             "Request body exceeded provider size limit; stripped {} oversized inline image(s) and retrying",
             stripped
         ));
+        crate::logging::event_info(
+            "CONTEXT_PAYLOAD_RECOVERY",
+            vec![
+                ("status".to_string(), "applied".to_string()),
+                ("images_stripped".to_string(), stripped.to_string()),
+            ],
+        );
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
                 "payload_too_large_recovered",
@@ -329,6 +349,13 @@ impl Agent {
 
         logging::warn(
             "OpenAI native compaction payload exceeded provider size limit; discarded native state and retrying with text fallback",
+        );
+        crate::logging::event_info(
+            "CONTEXT_NATIVE_COMPACTION_RECOVERY",
+            vec![
+                ("status".to_string(), "applied".to_string()),
+                ("fallback".to_string(), "text".to_string()),
+            ],
         );
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(

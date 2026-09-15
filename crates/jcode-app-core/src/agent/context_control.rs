@@ -1,7 +1,8 @@
 use super::Agent;
 use crate::context::{ContextBudget, ContextComponentHashes, ContextRevision, sha256_hex};
 use crate::context_controller::{
-    ContextActionKind, ContextActionOutcome, ContextActionRequest, ContextPreflightPlan,
+    ContextActionKind, ContextActionOutcome, ContextActionRequest, ContextPreflightAction,
+    ContextPreflightPlan,
 };
 use crate::message::{ContentBlock, Message, Role, ToolDefinition};
 use crate::prompt::SplitSystemPrompt;
@@ -147,6 +148,35 @@ fn content_token_estimate(content: &[ContentBlock]) -> usize {
         .fold(4usize, |total, tokens| total.saturating_add(tokens))
 }
 
+fn preflight_action_name(action: ContextPreflightAction) -> &'static str {
+    match action {
+        ContextPreflightAction::Send => "send",
+        ContextPreflightAction::Refresh => "refresh",
+        ContextPreflightAction::Compact => "compact",
+        ContextPreflightAction::RefreshThenCompact => "refresh_then_compact",
+    }
+}
+
+fn context_action_name(action: ContextActionKind) -> &'static str {
+    match action {
+        ContextActionKind::Refresh => "refresh",
+        ContextActionKind::Compact => "compact",
+        ContextActionKind::ResetProvider => "reset_provider",
+        ContextActionKind::Export => "export",
+        ContextActionKind::Prune => "prune",
+        ContextActionKind::UndoPrune => "undo_prune",
+    }
+}
+
+fn context_action_status(outcome: &ContextActionOutcome) -> &'static str {
+    match outcome {
+        ContextActionOutcome::Completed { .. } => "completed",
+        ContextActionOutcome::Skipped { .. } => "skipped",
+        ContextActionOutcome::Failed { .. } => "failed",
+        ContextActionOutcome::Rejected { .. } => "rejected",
+    }
+}
+
 impl Agent {
     pub(super) fn trace_context(
         &self,
@@ -172,6 +202,46 @@ impl Agent {
             .fold((0usize, 0usize), |(count, tokens), estimate| {
                 (count.saturating_add(1), tokens.saturating_add(estimate))
             });
+        let provider_context_limit = self.provider.context_window();
+        crate::logging::event_debug(
+            "CONTEXT_METRICS",
+            vec![
+                ("revision".to_string(), plan.revision.0.to_string()),
+                (
+                    "estimated_input_tokens".to_string(),
+                    plan.estimated_input_tokens.to_string(),
+                ),
+                (
+                    "message_estimated_tokens".to_string(),
+                    plan.estimated_input_tokens
+                        .saturating_sub(system_prompt_estimated_tokens)
+                        .saturating_sub(tool_definition_estimated_tokens)
+                        .to_string(),
+                ),
+                (
+                    "system_prompt_estimated_tokens".to_string(),
+                    system_prompt_estimated_tokens.to_string(),
+                ),
+                ("tool_definition_count".to_string(), tools.len().to_string()),
+                (
+                    "tool_definition_estimated_tokens".to_string(),
+                    tool_definition_estimated_tokens.to_string(),
+                ),
+                ("image_count".to_string(), image_count.to_string()),
+                (
+                    "image_estimated_tokens".to_string(),
+                    image_estimated_tokens.to_string(),
+                ),
+                (
+                    "provider_context_limit".to_string(),
+                    provider_context_limit.to_string(),
+                ),
+                (
+                    "max_input_tokens".to_string(),
+                    plan.max_input_tokens.to_string(),
+                ),
+            ],
+        );
         eprintln!(
             "[trace] context_metrics revision={} estimated_input={} message_estimated={} system_prompt_estimated={} tool_definition_count={} tool_definition_estimated={} image_count={} image_estimated_tokens={} provider_context_limit={} max_input_tokens={}",
             plan.revision.0,
@@ -184,7 +254,7 @@ impl Agent {
             tool_definition_estimated_tokens,
             image_count,
             image_estimated_tokens,
-            self.provider.context_window(),
+            provider_context_limit,
             plan.max_input_tokens,
         );
     }
@@ -274,9 +344,11 @@ impl Agent {
         };
         self.refresh_components_binding(&components);
         let message_tokens = message_token_estimate(messages);
-        let estimated_input_tokens = split_prompt
-            .estimated_tokens()
-            .saturating_add(ToolDefinition::aggregate_prompt_token_estimate(tools))
+        let system_prompt_estimated_tokens = split_prompt.estimated_tokens();
+        let tool_definition_estimated_tokens =
+            ToolDefinition::aggregate_prompt_token_estimate(tools);
+        let estimated_input_tokens = system_prompt_estimated_tokens
+            .saturating_add(tool_definition_estimated_tokens)
             .saturating_add(message_tokens);
         let provider_context_limit = self.provider.context_window();
         let reserved_output_tokens = RESERVED_OUTPUT_TOKENS.min(provider_context_limit / 4);
@@ -306,6 +378,55 @@ impl Agent {
         // Снимок проекции обрезки нужен, чтобы `preview` отвечал по текущему
         // транскрипту, не читая его через контроллер.
         self.record_prune_projections(plan.revision, message_tokens);
+
+        crate::logging::event_debug(
+            "CONTEXT_PREFLIGHT",
+            vec![
+                (
+                    "action".to_string(),
+                    preflight_action_name(plan.action).to_string(),
+                ),
+                ("revision".to_string(), plan.revision.0.to_string()),
+                (
+                    "estimated_input_tokens".to_string(),
+                    plan.estimated_input_tokens.to_string(),
+                ),
+                (
+                    "message_estimated_tokens".to_string(),
+                    message_tokens.to_string(),
+                ),
+                (
+                    "system_prompt_estimated_tokens".to_string(),
+                    system_prompt_estimated_tokens.to_string(),
+                ),
+                (
+                    "tool_definition_estimated_tokens".to_string(),
+                    tool_definition_estimated_tokens.to_string(),
+                ),
+                ("message_count".to_string(), messages.len().to_string()),
+                ("tool_count".to_string(), tools.len().to_string()),
+                (
+                    "provider_context_limit".to_string(),
+                    provider_context_limit.to_string(),
+                ),
+                (
+                    "max_input_tokens".to_string(),
+                    plan.max_input_tokens.to_string(),
+                ),
+                (
+                    "needs_refresh".to_string(),
+                    plan.needs_refresh().to_string(),
+                ),
+                (
+                    "needs_compaction".to_string(),
+                    plan.needs_compaction().to_string(),
+                ),
+                (
+                    "provider_session_present".to_string(),
+                    self.provider_session_id.is_some().to_string(),
+                ),
+            ],
+        );
 
         crate::logging::info(&format!(
             "Context preflight: action={:?} revision={} estimated={} max={} provider_limit={}",
@@ -343,6 +464,14 @@ impl Agent {
             "Skipping provider request for stale context revision {} (current {})",
             revision.0, current.0
         ));
+        crate::logging::event_warn(
+            "CONTEXT_PROVIDER_REQUEST_REJECTED",
+            vec![
+                ("reason".to_string(), "stale_revision".to_string()),
+                ("requested_revision".to_string(), revision.0.to_string()),
+                ("current_revision".to_string(), current.0.to_string()),
+            ],
+        );
         false
     }
 
@@ -361,14 +490,25 @@ impl Agent {
         if !self.note_provider_response_revision(revision) {
             return false;
         }
-        let Some(observed_input_tokens) = observed_input_tokens else {
-            return true;
-        };
-        let observed = usize::try_from(observed_input_tokens).unwrap_or(usize::MAX);
-        self.context_controller
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .record_observed_input_tokens(revision, observed);
+        if let Some(observed_input_tokens) = observed_input_tokens {
+            let observed = usize::try_from(observed_input_tokens).unwrap_or(usize::MAX);
+            self.context_controller
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .record_observed_input_tokens(revision, observed);
+        }
+        crate::logging::event_debug(
+            "CONTEXT_PROVIDER_RESPONSE_ACCEPTED",
+            vec![
+                ("revision".to_string(), revision.0.to_string()),
+                (
+                    "observed_input_tokens".to_string(),
+                    observed_input_tokens
+                        .map(|tokens| tokens.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                ),
+            ],
+        );
         true
     }
 
@@ -392,6 +532,14 @@ impl Agent {
             "Ignoring late provider response for stale context revision {} (current {})",
             revision.0, current.0
         ));
+        crate::logging::event_warn(
+            "CONTEXT_PROVIDER_RESPONSE_REJECTED",
+            vec![
+                ("reason".to_string(), "stale_revision".to_string()),
+                ("response_revision".to_string(), revision.0.to_string()),
+                ("current_revision".to_string(), current.0.to_string()),
+            ],
+        );
         self.last_stale_provider_revision = Some(revision.0);
         self.invalidate_provider_context("late provider response for a stale context revision");
         false
@@ -423,6 +571,28 @@ impl Agent {
         };
         for request in pending {
             let outcome = self.apply_context_action(&request, current_revision);
+            crate::logging::event_debug(
+                "CONTEXT_ACTION_RESULT",
+                vec![
+                    (
+                        "action".to_string(),
+                        context_action_name(request.action).to_string(),
+                    ),
+                    ("sequence".to_string(), request.sequence.to_string()),
+                    (
+                        "base_revision".to_string(),
+                        request.base_revision.0.to_string(),
+                    ),
+                    (
+                        "boundary_revision".to_string(),
+                        current_revision.0.to_string(),
+                    ),
+                    (
+                        "status".to_string(),
+                        context_action_status(&outcome).to_string(),
+                    ),
+                ],
+            );
             self.context_controller
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -466,5 +636,55 @@ impl Agent {
             },
             ContextActionKind::UndoPrune => self.undo_prune_for_model_request(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_event_labels_are_stable() {
+        assert_eq!(preflight_action_name(ContextPreflightAction::Send), "send");
+        assert_eq!(
+            preflight_action_name(ContextPreflightAction::RefreshThenCompact),
+            "refresh_then_compact"
+        );
+        assert_eq!(
+            context_action_name(ContextActionKind::ResetProvider),
+            "reset_provider"
+        );
+        assert_eq!(
+            context_action_name(ContextActionKind::UndoPrune),
+            "undo_prune"
+        );
+    }
+
+    #[test]
+    fn context_event_statuses_cover_all_outcomes() {
+        assert_eq!(
+            context_action_status(&ContextActionOutcome::Completed {
+                detail: "ok".to_string(),
+            }),
+            "completed"
+        );
+        assert_eq!(
+            context_action_status(&ContextActionOutcome::Skipped {
+                reason: "not needed".to_string(),
+            }),
+            "skipped"
+        );
+        assert_eq!(
+            context_action_status(&ContextActionOutcome::Failed {
+                reason: "failed".to_string(),
+            }),
+            "failed"
+        );
+        assert_eq!(
+            context_action_status(&ContextActionOutcome::Rejected {
+                reason: "stale".to_string(),
+            }),
+            "rejected"
+        );
     }
 }

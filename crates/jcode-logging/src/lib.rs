@@ -1243,6 +1243,41 @@ mod tests {
     }
 
     #[test]
+    fn context_event_record_is_jsonl_and_keeps_only_aggregate_usage() {
+        let record = serialize_record(
+            Local::now(),
+            LogLevel::Debug,
+            Some("CONTEXT_PROVIDER_USAGE"),
+            Some("CONTEXT_PROVIDER_USAGE"),
+            &LogContext::default(),
+            vec![
+                ("revision", "7"),
+                ("input_tokens", "1200"),
+                ("output_tokens", "18"),
+                ("cache_read_input_tokens", "800"),
+                ("context_revision_accepted", "true"),
+            ],
+        )
+        .expect("serialize context event");
+        let parsed: serde_json::Value = serde_json::from_str(&record).expect("valid JSONL");
+
+        assert_eq!(parsed["event"], serde_json::json!("CONTEXT_PROVIDER_USAGE"));
+        assert_eq!(
+            parsed["message"],
+            serde_json::json!("CONTEXT_PROVIDER_USAGE")
+        );
+        assert_eq!(parsed["revision"], serde_json::json!("7"));
+        assert_eq!(parsed["input_tokens"], serde_json::json!("1200"));
+        assert_eq!(
+            parsed["context_revision_accepted"],
+            serde_json::json!("true")
+        );
+        assert!(parsed.get("prompt").is_none());
+        assert!(parsed.get("response").is_none());
+        assert!(parsed.get("credentials").is_none());
+    }
+
+    #[test]
     fn plain_messages_redact_sensitive_assignments_and_urls() {
         let message = sanitize_log_value(
             "Authorization: Bearer super-secret api_key=sk-secret target_url=https://example.test/cb?code=secret",

@@ -244,6 +244,27 @@ impl Agent {
             if !self.final_provider_revision_gate(context_revision) {
                 continue;
             }
+            crate::logging::event_debug(
+                "CONTEXT_PROVIDER_REQUEST",
+                vec![
+                    ("mode".to_string(), "mpsc".to_string()),
+                    ("revision".to_string(), context_revision.0.to_string()),
+                    (
+                        "estimated_input_tokens".to_string(),
+                        context_plan.estimated_input_tokens.to_string(),
+                    ),
+                    (
+                        "max_input_tokens".to_string(),
+                        context_plan.max_input_tokens.to_string(),
+                    ),
+                    ("message_count".to_string(), send_messages.len().to_string()),
+                    ("tool_count".to_string(), tools.len().to_string()),
+                    (
+                        "provider_session_present".to_string(),
+                        resume_session_id.is_some().to_string(),
+                    ),
+                ],
+            );
             let mut stream = {
                 let mut complete_future = std::pin::pin!(provider.complete_split(
                     send_messages,
@@ -1016,7 +1037,36 @@ impl Agent {
                 cache_read_input_tokens: usage_cache_read,
                 cache_creation_input_tokens: usage_cache_creation,
             };
-            if !self.record_context_usage(context_revision, usage_input) {
+            let context_revision_accepted =
+                self.record_context_usage(context_revision, usage_input);
+            crate::logging::event_debug(
+                "CONTEXT_PROVIDER_USAGE",
+                vec![
+                    ("mode".to_string(), "mpsc".to_string()),
+                    ("revision".to_string(), context_revision.0.to_string()),
+                    (
+                        "input_tokens".to_string(),
+                        usage_input.unwrap_or(0).to_string(),
+                    ),
+                    (
+                        "output_tokens".to_string(),
+                        usage_output.unwrap_or(0).to_string(),
+                    ),
+                    (
+                        "cache_read_input_tokens".to_string(),
+                        usage_cache_read.unwrap_or(0).to_string(),
+                    ),
+                    (
+                        "cache_creation_input_tokens".to_string(),
+                        usage_cache_creation.unwrap_or(0).to_string(),
+                    ),
+                    (
+                        "context_revision_accepted".to_string(),
+                        context_revision_accepted.to_string(),
+                    ),
+                ],
+            );
+            if !context_revision_accepted {
                 clear_stale_stream_text(&event_tx);
                 break;
             }
