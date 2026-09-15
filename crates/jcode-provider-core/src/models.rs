@@ -355,6 +355,15 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
         return Some(131_072);
     }
 
+    // --- xAI Grok 4 family ---
+    // Conifer's public catalog exposes distinct windows for these static ids.
+    if m.contains("grok-4.3") {
+        return Some(1_000_000);
+    }
+    if m.contains("grok-4.5") || m.contains("grok-4.6") {
+        return Some(500_000);
+    }
+
     // --- Moonshot Kimi family ---
     // Kimi Code serves the flagship under the bare id `k3` (no `kimi` in the
     // id), so match the bare `k<n>` shape too (issue #577).
@@ -383,6 +392,62 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
     // --- Xiaomi MiMo V2 family: 256K context ---
     if m.contains("mimo") {
         return Some(262_144);
+    }
+
+    // --- ByteDance Seed 2.0 family ---
+    if m.contains("seed-2.0") {
+        return Some(256_000);
+    }
+
+    // --- StepFun Step 3.7 family ---
+    if m.contains("step-3.7-flash") {
+        return Some(262_144);
+    }
+
+    // --- Tencent Hunyuan 3 family ---
+    if m.contains("hy3") {
+        return Some(262_144);
+    }
+
+    // --- InclusionAI Ling 3.0 family ---
+    if m.contains("ling-3.0") {
+        return Some(131_072);
+    }
+
+    // --- Thinking Machines Inkling family ---
+    if m.contains("inkling") {
+        return Some(524_288);
+    }
+
+    // --- NVIDIA Nemotron 3 family ---
+    if m.contains("nemotron-3") {
+        return Some(262_144);
+    }
+
+    // --- Mistral latest aliases ---
+    if matches!(
+        m,
+        "mistral-large-latest" | "mistral-medium-latest" | "mistral-small-latest"
+    ) {
+        return Some(256_000);
+    }
+
+    // --- Cohere Command A ---
+    if m.contains("command-a") {
+        return Some(256_000);
+    }
+
+    // --- Meta Llama 4 family ---
+    if m.contains("llama-4-maverick") {
+        return Some(1_048_576);
+    }
+    if m.contains("llama-4-scout") {
+        return Some(327_680);
+    }
+
+    // --- Google Gemma 4 ---
+    if m.contains("gemma-4-31b") {
+        return Some(128_000);
     }
 
     // --- Meta Muse Spark family: 1 Mi tokens ---

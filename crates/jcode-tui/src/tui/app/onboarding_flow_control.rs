@@ -1187,19 +1187,18 @@ impl App {
         let Some(provider) = self.onboarding_validation_provider() else {
             return;
         };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
         let model_label = self.onboarding_default_model_label();
         let provider_key = crate::session::derive_session_provider_key(provider.name());
         let session_id = self.session.id.clone();
-        // Whether to also run a definitive live Copilot auth check. Copilot is
-        // unusual: a local GitHub token can exist while the account is banned or
-        // not entitled, so the presence-only probe used by the readiness summary
-        // would otherwise show a banned account as "Ready to use". We skip it
-        // when Copilot is the default provider (the model ping already covers
-        // it) or when no Copilot credentials are present locally.
+        // A local Copilot token may lack entitlement, so validate live unless
+        // Copilot is default (the model ping covers it) or no credentials exist.
         let verify_copilot = provider_key.as_deref() != Some("copilot")
             && crate::auth::copilot::has_copilot_credentials_fast();
         self.set_status_notice(format!("Checking {model_label}..."));
-        tokio::spawn(async move {
+        handle.spawn(async move {
             // Run the definitive Copilot auth check first so its validation
             // record is persisted (and the auth cache invalidated) before the
             // readiness summary reads `check_fast()` below.

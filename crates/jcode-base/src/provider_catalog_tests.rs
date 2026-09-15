@@ -1,5 +1,5 @@
 use super::*;
-
+include!("provider_catalog_context_tests.rs");
 #[test]
 fn conifer_static_fallback_contains_the_issue_catalog() {
     let profile = openai_compatible_profile_by_id("conifer").expect("Conifer profile");

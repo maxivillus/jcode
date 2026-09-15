@@ -6,7 +6,10 @@ use std::time::Instant;
 
 use super::journal::{PersistVectorMode, SessionJournalEntry, metadata_requires_snapshot};
 use super::storage_paths::{file_len_or_zero, session_journal_path_from_snapshot, session_path};
-use super::{MAX_SESSION_JOURNAL_BYTES, RemoteStartupSessionSnapshot, Session, SessionStartupStub};
+use super::{
+    MAX_SESSION_JOURNAL_BYTES, RemoteStartupSessionSnapshot, Session, SessionStartupStub,
+    SessionStatus,
+};
 use crate::storage;
 
 /// Outcome of replaying one session journal file.
@@ -381,20 +384,37 @@ impl Session {
         // the user (or a programmatic caller) adds a real conversation message,
         // the normal first snapshot includes all of the accumulated context.
         if !self.persist_state.snapshot_exists
-            && !self
+            && !self.messages.is_empty()
+            && self
                 .messages
                 .iter()
-                .any(super::is_visible_conversation_message)
+                .all(super::is_initial_session_context_message)
             && !self.saved
+            && self.parent_id.is_none()
             && self.custom_title.is_none()
             && self.title.is_none()
             && !self.is_debug
             && !self.is_canary
             && self.testing_build.is_none()
             && self.compaction.is_none()
+            && self.provider_session_id.is_none()
             && self.improve_mode.is_none()
             && self.rewind_undo_snapshot.is_none()
             && self.prune_undo_snapshot.is_none()
+            && self.provider_key.is_none()
+            && self.model.is_none()
+            && self.route_api_method.is_none()
+            && self.reasoning_effort.is_none()
+            && self.subagent_model.is_none()
+            && self.autoreview_enabled.is_none()
+            && self.autojudge_enabled.is_none()
+            && self.working_dir == super::current_working_dir_string()
+            && self.short_name == crate::id::extract_session_name(&self.id).map(str::to_string)
+            && self.save_label.is_none()
+            && self.env_snapshots.is_empty()
+            && self.memory_injections.is_empty()
+            && self.replay_events.is_empty()
+            && self.status == SessionStatus::Active
         {
             return Ok(());
         }

@@ -37,6 +37,8 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_ACTIVE_PROVIDER",
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
+        "JCODE_MODEL",
+        "JCODE_PROVIDER",
         "JCODE_OPENAI_MODEL",
         "JCODE_NAMED_PROVIDER_PROFILE",
         "JCODE_PROVIDER_PROFILE_ACTIVE",

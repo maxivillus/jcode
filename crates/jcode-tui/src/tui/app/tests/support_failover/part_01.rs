@@ -400,7 +400,22 @@ fn clear_persisted_test_ui_state() {
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
+    let isolated_env = [
+        "JCODE_HOME",
+        "JCODE_MODEL",
+        "JCODE_PROVIDER",
+        "JCODE_CROSS_PROVIDER_FAILOVER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_RUNTIME_PROVIDER",
+    ];
+    let previous_env = isolated_env
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect::<Vec<_>>();
+    for (key, _) in &previous_env {
+        crate::env::remove_var(key);
+    }
     crate::env::set_var("JCODE_HOME", temp.path());
     crate::auth::claude::set_active_account_override(None);
     crate::auth::codex::set_active_account_override(None);
@@ -416,10 +431,12 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     crate::auth::codex::set_active_account_override(None);
     crate::auth::AuthStatus::invalidate_cache();
     crate::tui::app::helpers::clear_ambient_info_cache_for_tests();
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
+    for (key, value) in previous_env {
+        if let Some(value) = value {
+            crate::env::set_var(key, value);
+        } else {
+            crate::env::remove_var(key);
+        }
     }
     // Drop any config loaded from the temp home so it cannot leak into the next
     // test, which is process-global state shared across this suite.
