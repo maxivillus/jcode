@@ -144,10 +144,10 @@ impl Agent {
             }
 
             let tools = self.tool_definitions().await;
-            let messages: std::sync::Arc<[Message]> = messages.into();
+            let history_messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending = self.build_memory_prompt_nonblocking_shared(
-                std::sync::Arc::clone(&messages),
+                std::sync::Arc::clone(&history_messages),
                 Some(std::sync::Arc::new({
                     let event_tx = event_tx.clone();
                     move |event| {
@@ -158,6 +158,11 @@ impl Agent {
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split(None);
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
+            let messages = self.prepare_provider_context_view(
+                &history_messages,
+                split_prompt.estimated_tokens(),
+                &tools,
+            );
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
@@ -177,7 +182,7 @@ impl Agent {
             let mut ephemeral_signature_messages = Vec::new();
 
             // Inject memory as a user message at the end (preserves cache prefix)
-            let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
+            let mut messages_with_memory: Vec<Message> = messages.clone();
             if let Some(memory) = memory_pending.as_ref() {
                 let memory_count = memory.count.max(1);
                 let computed_age_ms = memory.computed_at.elapsed().as_millis() as u64;

@@ -271,6 +271,7 @@ impl Agent {
         self.provider_session_id = None;
         self.session.provider_session_id = None;
         self.cache_tracker.reset();
+        self.provider_context_view.reset();
         self.locked_tools = None;
         self.reset_tool_output_tracking();
         self.note_transcript_mutation();
@@ -291,6 +292,7 @@ impl Agent {
         self.session.updated_at = chrono::Utc::now();
         self.bump_provider_context_generation();
         self.cache_tracker.reset();
+        self.provider_context_view.reset();
         self.locked_tools = None;
         self.reset_tool_output_tracking();
         self.note_transcript_mutation();

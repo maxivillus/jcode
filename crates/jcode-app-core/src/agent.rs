@@ -9,6 +9,7 @@ mod interrupts;
 mod messages;
 mod prompting;
 mod provider;
+pub mod provider_context_view;
 mod response_recovery;
 mod status;
 mod streaming;
@@ -251,6 +252,8 @@ pub struct Agent {
     last_provider_static_prompt_hash: Option<String>,
     /// AGENTS, skills and tools hashes seen at the last preflight.
     last_provider_components_fingerprint: Option<String>,
+    /// Стабильное автоматическое представление старой истории для провайдера.
+    provider_context_view: provider_context_view::ProviderContextViewState,
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
     /// Момент последней мутации транскрипта (rewind, prune, compact).
@@ -341,6 +344,7 @@ impl Agent {
             agents_md_snapshot,
             last_provider_static_prompt_hash: None,
             last_provider_components_fingerprint: None,
+            provider_context_view: provider_context_view::ProviderContextViewState::default(),
             memory_enabled: crate::config::config().features.memory,
             last_transcript_mutation_at: None,
             stdin_request_tx: None,
@@ -655,6 +659,7 @@ impl Agent {
         self.mcp_late_register_resolved = false;
         self.last_provider_static_prompt_hash = None;
         self.last_provider_components_fingerprint = None;
+        self.provider_context_view.reset();
     }
 
     /// Synchronize the remote client's selected skill, accepting only names
@@ -816,39 +821,11 @@ impl Agent {
             return;
         }
 
-        let fast_snapshot =
-            if !self.provider.uses_jcode_compaction() && self.session.compaction.is_none() {
-                let previous_count = self.cache_tracker.previous_message_count();
-                let prefix_hashes = self.session.provider_message_prefix_hashes();
-                let current_count = prefix_hashes.len();
-                let current_full_hash = prefix_hashes.last().copied();
-                let prefix_hash_at_previous_count =
-                    if previous_count == 0 || previous_count > current_count {
-                        None
-                    } else {
-                        Some(prefix_hashes[previous_count - 1])
-                    };
-                Some((
-                    current_count,
-                    prefix_hash_at_previous_count,
-                    current_full_hash,
-                ))
-            } else {
-                None
-            };
-
-        let violation =
-            if let Some((current_count, prefix_hash_at_previous_count, current_full_hash)) =
-                fast_snapshot
-            {
-                self.cache_tracker.record_prefix_hash_snapshot(
-                    current_count,
-                    prefix_hash_at_previous_count,
-                    current_full_hash,
-                )
-            } else {
-                self.cache_tracker.record_request(messages)
-            };
+        // Проверяем именно тот снимок, который уйдёт провайдеру. Раньше быстрый
+        // путь читал полный Session, поэтому виртуальное удаление старого
+        // контекста выглядело как случайное нарушение префикса.
+        let prefix_hashes = crate::message::cache_relevant_message_hashes(messages);
+        let violation = self.cache_tracker.record_prefix_hashes(&prefix_hashes);
 
         if let Some(violation) = violation {
             logging::warn(&format!(
@@ -856,6 +833,70 @@ impl Agent {
                 violation.reason, violation.turn, violation.message_count
             ));
         }
+    }
+
+    pub(super) fn prepare_provider_context_view(
+        &mut self,
+        messages: &[Message],
+        system_prompt_tokens: usize,
+        tools: &[ToolDefinition],
+    ) -> Vec<Message> {
+        let tool_definition_tokens = ToolDefinition::aggregate_prompt_token_estimate(tools);
+        let result = self.provider_context_view.project(
+            messages,
+            self.provider.context_window(),
+            system_prompt_tokens,
+            tool_definition_tokens,
+        );
+        if result.representation_changed {
+            self.invalidate_provider_context("automatic provider context view changed");
+        }
+        crate::logging::event_debug(
+            "CONTEXT_AUTOMATIC_VIEW",
+            vec![
+                ("reason".to_string(), result.reason.clone()),
+                (
+                    "source_version".to_string(),
+                    format!("{:016x}", result.source_version),
+                ),
+                (
+                    "view_version".to_string(),
+                    format!("{:016x}", result.view_version),
+                ),
+                (
+                    "provider_context_generation".to_string(),
+                    self.provider_context_generation().to_string(),
+                ),
+                ("active".to_string(), result.active.to_string()),
+                (
+                    "before_tokens".to_string(),
+                    result.before_tokens.to_string(),
+                ),
+                ("after_tokens".to_string(), result.after_tokens.to_string()),
+                (
+                    "before_turn_groups".to_string(),
+                    result.before_turn_groups.to_string(),
+                ),
+                (
+                    "after_turn_groups".to_string(),
+                    result.after_turn_groups.to_string(),
+                ),
+                (
+                    "excluded_messages".to_string(),
+                    result.excluded_messages.to_string(),
+                ),
+                (
+                    "excluded_turn_groups".to_string(),
+                    result.excluded_turn_groups.to_string(),
+                ),
+                (
+                    "summary_messages".to_string(),
+                    result.summary_messages.to_string(),
+                ),
+                ("unknown_relevance".to_string(), "not_proven".to_string()),
+            ],
+        );
+        result.messages
     }
 
     fn repair_missing_tool_outputs(&mut self) -> usize {

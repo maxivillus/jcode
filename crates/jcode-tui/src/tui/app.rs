@@ -877,6 +877,8 @@ pub struct App {
     token_accounting: TokenAccounting,
     // KV cache baseline tracking + per-turn miss attribution.
     kv_cache: KvCacheState,
+    // Provider-facing automatic tail/turn projection. The canonical session remains unchanged.
+    provider_context_view: crate::agent::provider_context_view::ProviderContextViewState,
     // Accumulated session cost + cached per-model pricing.
     cost: CostState,
     // Context limit tracking (for compaction warning)

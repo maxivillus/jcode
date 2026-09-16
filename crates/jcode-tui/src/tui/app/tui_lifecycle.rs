@@ -430,6 +430,8 @@ impl App {
             status_detail: None,
             token_accounting: TokenAccounting::default(),
             kv_cache: KvCacheState::default(),
+            provider_context_view:
+                crate::agent::provider_context_view::ProviderContextViewState::default(),
             cost: CostState::default(),
             context_limit,
             context_warning_shown: false,
@@ -879,6 +881,8 @@ impl App {
             status_detail: None,
             token_accounting: TokenAccounting::default(),
             kv_cache: KvCacheState::default(),
+            provider_context_view:
+                crate::agent::provider_context_view::ProviderContextViewState::default(),
             cost: CostState::default(),
             context_limit,
             context_warning_shown: false,

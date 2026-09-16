@@ -5,6 +5,7 @@ impl Agent {
     pub(super) fn note_compaction_applied(&mut self) {
         self.bump_provider_context_generation();
         self.cache_tracker.reset();
+        self.provider_context_view.reset();
         self.locked_tools = None;
         self.provider_session_id = None;
         self.session.provider_session_id = None;

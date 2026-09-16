@@ -394,6 +394,11 @@ impl App {
     }
 
     pub(super) fn reset_provider_context_state(&mut self) {
+        self.provider_context_view.reset();
+        self.advance_provider_context_generation();
+    }
+
+    pub(super) fn advance_provider_context_generation(&mut self) {
         // Compaction or an explicit reset makes the previous provider-facing
         // transcript invalid as an append-only cache baseline. Advance the
         // generation as well as clearing the current baseline so a request
