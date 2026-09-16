@@ -547,6 +547,7 @@ impl Agent {
         self.provider_session_id = snapshot.provider_session_id;
         self.session.provider_session_id = snapshot.session_provider_session_id;
         self.session.updated_at = chrono::Utc::now();
+        self.bump_provider_context_generation();
         self.cache_tracker.reset();
         self.locked_tools = None;
         self.reset_tool_output_tracking();

@@ -909,22 +909,26 @@ pub(in crate::tui::app) fn handle_server_event(
             ephemeral_hash,
             ephemeral_chars,
             ephemeral_message_count,
+            cache_generation,
         } => {
             remote.reset_call_output_tokens_seen();
-            app.begin_remote_kv_cache_request(app_mod::KvCacheRequestSignature {
-                system_static_hash,
-                tools_hash,
-                messages_hash,
-                message_hashes,
-                message_count,
-                tool_count,
-                system_static_chars,
-                tools_json_chars,
-                messages_json_chars,
-                ephemeral_hash,
-                ephemeral_chars,
-                ephemeral_message_count,
-            });
+            app.begin_remote_kv_cache_request_with_generation(
+                app_mod::KvCacheRequestSignature {
+                    system_static_hash,
+                    tools_hash,
+                    messages_hash,
+                    message_hashes,
+                    message_count,
+                    tool_count,
+                    system_static_chars,
+                    tools_json_chars,
+                    messages_json_chars,
+                    ephemeral_hash,
+                    ephemeral_chars,
+                    ephemeral_message_count,
+                },
+                cache_generation,
+            );
             false
         }
         ServerEvent::ConnectionType { connection } => {

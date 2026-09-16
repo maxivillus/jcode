@@ -105,6 +105,7 @@ fn kv_cache_request_event(
     tools: &[ToolDefinition],
     system_static: &str,
     ephemeral_messages: &[Message],
+    cache_generation: u64,
 ) -> ServerEvent {
     let ephemeral_hash = if ephemeral_messages.is_empty() {
         None
@@ -124,6 +125,7 @@ fn kv_cache_request_event(
         ephemeral_hash,
         ephemeral_chars: stable_json_len(ephemeral_messages),
         ephemeral_message_count: ephemeral_messages.len(),
+        cache_generation: Some(cache_generation),
     }
 }
 
@@ -189,6 +191,9 @@ pub struct Agent {
     mcp_tools_token_threshold: usize,
     /// Provider-specific session ID for conversation resume (e.g., Claude Code CLI session)
     provider_session_id: Option<String>,
+    /// Поколение постоянного контекста, отправляемого провайдеру.
+    /// Меняется только при сбросе или структурной перестройке контекста.
+    provider_context_generation: u64,
     /// Last upstream provider (OpenRouter) observed for this session
     last_upstream_provider: Option<String>,
     /// Last observed transport/connection type for this session
@@ -314,6 +319,7 @@ impl Agent {
             mcp_tools_mode: tool_config.mcp_tools,
             mcp_tools_token_threshold: tool_config.mcp_tools_token_threshold,
             provider_session_id: None,
+            provider_context_generation: 0,
             last_upstream_provider: None,
             last_connection_type: None,
             last_status_detail: None,
@@ -605,6 +611,7 @@ impl Agent {
         let had_provider_session =
             self.provider_session_id.is_some() || self.session.provider_session_id.is_some();
 
+        self.bump_provider_context_generation();
         self.provider_session_id = None;
         self.session.provider_session_id = None;
         self.cache_tracker.reset();
@@ -616,7 +623,16 @@ impl Agent {
         had_provider_session
     }
 
+    pub(super) fn provider_context_generation(&self) -> u64 {
+        self.provider_context_generation
+    }
+
+    pub(super) fn bump_provider_context_generation(&mut self) {
+        self.provider_context_generation = self.provider_context_generation.wrapping_add(1);
+    }
+
     fn reset_runtime_state_for_session_change(&mut self) {
+        self.bump_provider_context_generation();
         self.active_skill = None;
         self.last_upstream_provider = None;
         self.last_connection_type = None;
@@ -706,11 +722,8 @@ impl Agent {
             manager.restore_persisted_stored_state_with(&state, &self.session.messages);
         }
 
-        self.cache_tracker.reset();
-        self.locked_tools = None;
+        self.note_compaction_applied();
         self.mcp_late_register_resolved = false;
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
         self.session.save()?;
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(

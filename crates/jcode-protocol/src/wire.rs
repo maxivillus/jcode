@@ -872,6 +872,10 @@ pub enum ServerEvent {
         ephemeral_chars: usize,
         #[serde(default)]
         ephemeral_message_count: usize,
+        /// Поколение постоянного контекста, отправляемого провайдеру.
+        /// Отсутствующее значение сохраняет совместимость со старыми узлами.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_generation: Option<u64>,
     },
 
     /// Active transport/connection type for the current stream

@@ -3,6 +3,7 @@ use crate::context_controller::ContextActionOutcome;
 
 impl Agent {
     pub(super) fn note_compaction_applied(&mut self) {
+        self.bump_provider_context_generation();
         self.cache_tracker.reset();
         self.locked_tools = None;
         self.provider_session_id = None;
@@ -159,10 +160,7 @@ impl Agent {
             }
         };
 
-        self.cache_tracker.reset();
-        self.locked_tools = None;
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        self.note_compaction_applied();
         self.note_transcript_mutation();
 
         logging::warn(&format!(
@@ -228,10 +226,7 @@ impl Agent {
 
         match compacted {
             Ok((dropped, usage_pct)) => {
-                self.cache_tracker.reset();
-                self.locked_tools = None;
-                self.provider_session_id = None;
-                self.session.provider_session_id = None;
+                self.note_compaction_applied();
                 self.note_transcript_mutation();
                 self.refresh_prune_projections();
                 logging::info(&format!(
@@ -291,10 +286,7 @@ impl Agent {
             self.sync_session_compaction_state_from_manager(&manager);
         }
 
-        self.cache_tracker.reset();
-        self.locked_tools = None;
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        self.note_compaction_applied();
 
         logging::warn(&format!(
             "Request body exceeded provider size limit; stripped {} oversized inline image(s) and retrying",
@@ -342,10 +334,7 @@ impl Agent {
             return false;
         }
 
-        self.cache_tracker.reset();
-        self.locked_tools = None;
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        self.note_compaction_applied();
 
         logging::warn(
             "OpenAI native compaction payload exceeded provider size limit; discarded native state and retrying with text fallback",

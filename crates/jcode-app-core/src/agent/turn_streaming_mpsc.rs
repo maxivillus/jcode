@@ -278,6 +278,7 @@ impl Agent {
                     &tools,
                     &split_prompt.static_part,
                     &ephemeral_signature_messages,
+                    self.provider_context_generation(),
                 ));
                 // These vectors are only needed to build the cache telemetry event.
                 // Explicitly release their deeply cloned transcript strings before

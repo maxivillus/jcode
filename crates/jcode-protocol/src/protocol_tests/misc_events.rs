@@ -118,6 +118,46 @@ fn test_transcript_event_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_kv_cache_generation_is_optional_and_roundtrips() -> Result<()> {
+    let legacy = r#"{"type":"kv_cache_request","system_static_hash":1,"tools_hash":2,"messages_hash":3,"message_count":4,"tool_count":5}"#;
+    let decoded = parse_event_json(legacy)?;
+    let ServerEvent::KvCacheRequest {
+        cache_generation, ..
+    } = decoded
+    else {
+        return Err(anyhow!("expected KvCacheRequest event"));
+    };
+    assert_eq!(cache_generation, None);
+
+    let event = ServerEvent::KvCacheRequest {
+        system_static_hash: 1,
+        tools_hash: 2,
+        messages_hash: 3,
+        message_hashes: vec![4, 5],
+        message_count: 2,
+        tool_count: 6,
+        system_static_chars: 7,
+        tools_json_chars: 8,
+        messages_json_chars: 9,
+        ephemeral_hash: Some(10),
+        ephemeral_chars: 11,
+        ephemeral_message_count: 12,
+        cache_generation: Some(13),
+    };
+    let json = serde_json::to_string(&event)?;
+    assert!(json.contains("\"cache_generation\":13"));
+    let decoded = parse_event_json(&json)?;
+    let ServerEvent::KvCacheRequest {
+        cache_generation, ..
+    } = decoded
+    else {
+        return Err(anyhow!("expected KvCacheRequest event"));
+    };
+    assert_eq!(cache_generation, Some(13));
+    Ok(())
+}
+
+#[test]
 fn test_memory_activity_event_roundtrip() -> Result<()> {
     let event = ServerEvent::MemoryActivity {
         activity: MemoryActivitySnapshot {

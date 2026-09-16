@@ -1794,6 +1794,21 @@ impl App {
         &mut self,
         signature: KvCacheRequestSignature,
     ) {
+        self.begin_remote_kv_cache_request_with_generation(signature, None);
+    }
+
+    pub(in crate::tui::app) fn begin_remote_kv_cache_request_with_generation(
+        &mut self,
+        signature: KvCacheRequestSignature,
+        cache_generation: Option<u64>,
+    ) {
+        if let Some(cache_generation) = cache_generation {
+            if cache_generation != self.kv_cache.cache_generation {
+                self.reset_provider_context_state();
+                self.kv_cache.cache_generation = cache_generation;
+            }
+        }
+
         let turn_number = self
             .display_messages
             .iter()

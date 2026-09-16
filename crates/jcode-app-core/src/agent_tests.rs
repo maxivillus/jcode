@@ -88,6 +88,30 @@ fn message_text(message: &Message) -> &str {
     content_text(&message.content)
 }
 
+#[test]
+fn kv_cache_request_event_carries_provider_context_generation() {
+    let ServerEvent::KvCacheRequest {
+        cache_generation, ..
+    } = kv_cache_request_event(&[], &[], "system", &[], 9)
+    else {
+        panic!("expected KvCacheRequest event");
+    };
+
+    assert_eq!(cache_generation, Some(9));
+}
+
+#[tokio::test]
+async fn provider_context_generation_changes_when_context_is_invalidated() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    assert_eq!(agent.provider_context_generation(), 0);
+    assert!(!agent.invalidate_provider_context("test context invalidation"));
+    assert_eq!(agent.provider_context_generation(), 1);
+}
+
 #[async_trait]
 impl Provider for DelayedProvider {
     async fn complete(

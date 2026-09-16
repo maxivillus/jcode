@@ -582,6 +582,55 @@ fn kv_cache_baseline_same_session_still_compares() {
 }
 
 #[test]
+fn remote_cache_generation_change_clears_old_baseline_once() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("session_generation".to_string());
+
+    let history = vec![
+        Message::user("first prompt"),
+        Message::assistant_text("first answer"),
+    ];
+    let baseline_signature = App::kv_cache_request_signature(&history, &[], "system", "");
+    app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
+        session_id: Some("session_generation".to_string()),
+        cache_generation: app.kv_cache.cache_generation,
+        input_tokens: 1_000,
+        completed_at: Instant::now(),
+        provider: "anthropic".to_string(),
+        model: "claude-opus-4-6".to_string(),
+        upstream_provider: None,
+        signature: Some(baseline_signature),
+    });
+
+    let next_generation = app.kv_cache.cache_generation.wrapping_add(1);
+    let changed = vec![
+        Message::user("changed prompt"),
+        Message::assistant_text("first answer"),
+    ];
+    let changed_signature = App::kv_cache_request_signature(&changed, &[], "system", "");
+    app.begin_remote_kv_cache_request_with_generation(
+        changed_signature.clone(),
+        Some(next_generation),
+    );
+
+    assert_eq!(app.kv_cache.cache_generation, next_generation);
+    let request = app
+        .kv_cache
+        .pending_kv_cache_request
+        .as_ref()
+        .expect("request should be pending");
+    assert!(request.baseline.is_none());
+    assert_eq!(request.baseline_messages_prefix_matches, None);
+
+    app.begin_remote_kv_cache_request_with_generation(changed_signature, Some(next_generation));
+    assert_eq!(
+        app.kv_cache.cache_generation, next_generation,
+        "the same generation must not trigger another reset"
+    );
+}
+
+#[test]
 fn compaction_invalidates_kv_cache_baseline_and_stale_completion_cannot_restore_it() {
     let mut app = create_test_app();
     app.is_remote = true;
@@ -729,6 +778,7 @@ fn remote_token_usage_records_cache_stats_before_done_and_dedupes_snapshots() {
             ephemeral_hash: None,
             ephemeral_chars: 2,
             ephemeral_message_count: 0,
+            cache_generation: None,
         },
         &mut remote,
     );
