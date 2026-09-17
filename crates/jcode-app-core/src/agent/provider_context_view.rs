@@ -14,7 +14,7 @@ const RECENT_TURN_GROUPS: usize = 8;
 const MAX_TURN_GROUPS_BEFORE_PROJECTION: usize = 24;
 const MAX_PROJECTED_TURN_GROUPS_BEFORE_REBUILD: usize = 16;
 const SUMMARY_MAX_ITEMS: usize = 8;
-const SUMMARY_ITEM_CHARS: usize = 160;
+const SUMMARY_FIELD_CHARS: usize = 96;
 const MEMORY_INJECTION_PREFIX: &str = "<system-reminder>\n# Memory\n";
 const SYSTEM_REMINDER_PREFIX: &str = "<system-reminder>";
 const IMAGE_OMITTED_NOTE: &str =
@@ -56,6 +56,7 @@ pub struct ProviderContextViewResult {
     pub excluded_messages: usize,
     pub excluded_turn_groups: usize,
     pub summary_messages: usize,
+    pub summary_source_version: Option<u64>,
     pub reason: String,
 }
 
@@ -98,7 +99,8 @@ impl ProviderContextViewState {
         let mut cutoff = self
             .stable_boundary
             .and_then(|boundary| find_boundary(&source_prefix_hashes, boundary));
-        let mut rendered = cutoff.map(|value| render_projection(messages, value));
+        let mut rendered =
+            cutoff.map(|value| render_projection(messages, value, &source_prefix_hashes));
 
         if let (Some(existing_cutoff), Some(existing_rendered)) = (cutoff, rendered.as_ref()) {
             let projected_turn_groups = turn_group_ranges(&existing_rendered.0).len();
@@ -116,7 +118,7 @@ impl ProviderContextViewState {
 
         if cutoff.is_none() && pressure {
             if let Some((selected_cutoff, selected_rendered)) =
-                choose_projection(messages, trigger_tokens)
+                choose_projection(messages, trigger_tokens, &source_prefix_hashes)
             {
                 cutoff = Some(selected_cutoff);
                 rendered = Some(selected_rendered);
@@ -132,6 +134,16 @@ impl ProviderContextViewState {
         let after_turn_groups = turn_group_ranges(&output).len();
         let view_prefix_hashes = rolling_prefix_hashes(&output);
         let view_version = view_prefix_hashes.last().copied().unwrap_or_default();
+        let summary_source_version = if summary_messages > 0 {
+            Some(
+                cutoff
+                    .and_then(|value| value.checked_sub(1))
+                    .and_then(|index| source_prefix_hashes.get(index).copied())
+                    .unwrap_or_default(),
+            )
+        } else {
+            None
+        };
         let representation_changed = self.last_view.is_some_and(|previous| {
             previous.message_count > view_prefix_hashes.len()
                 || view_prefix_hashes
@@ -171,6 +183,7 @@ impl ProviderContextViewState {
             excluded_messages,
             excluded_turn_groups,
             summary_messages,
+            summary_source_version,
             reason,
         }
     }
@@ -208,6 +221,7 @@ fn find_boundary(prefix_hashes: &[u64], boundary: Boundary) -> Option<usize> {
 fn choose_projection(
     messages: &[Message],
     target_tokens: usize,
+    source_prefix_hashes: &[u64],
 ) -> Option<(usize, (Vec<Message>, usize, usize, usize))> {
     let ranges = turn_group_ranges(messages);
     if ranges.len() <= RECENT_TURN_GROUPS {
@@ -218,7 +232,7 @@ fn choose_projection(
     for recent_groups in (1..=maximum_recent).rev() {
         let group_index = ranges.len().saturating_sub(recent_groups);
         let candidate = balanced_suffix_start(messages, ranges[group_index].0);
-        let rendered = render_projection(messages, candidate);
+        let rendered = render_projection(messages, candidate, source_prefix_hashes);
         if message_token_estimate(&rendered.0) <= target_tokens || recent_groups == 1 {
             return Some((candidate, rendered));
         }
@@ -226,7 +240,11 @@ fn choose_projection(
     None
 }
 
-fn render_projection(messages: &[Message], cutoff: usize) -> (Vec<Message>, usize, usize, usize) {
+fn render_projection(
+    messages: &[Message],
+    cutoff: usize,
+    source_prefix_hashes: &[u64],
+) -> (Vec<Message>, usize, usize, usize) {
     let cutoff = cutoff.min(messages.len());
     let ranges = turn_group_ranges(messages);
     let excluded_turn_groups = ranges
@@ -250,7 +268,16 @@ fn render_projection(messages: &[Message], cutoff: usize) -> (Vec<Message>, usiz
     }
 
     if let Some(index) = summary_index {
-        output[index] = build_summary_message(&omitted, excluded_turn_groups, cutoff);
+        let source_boundary_version = cutoff
+            .checked_sub(1)
+            .and_then(|index| source_prefix_hashes.get(index).copied())
+            .unwrap_or_default();
+        output[index] = build_summary_message(
+            &omitted,
+            excluded_turn_groups,
+            cutoff,
+            source_boundary_version,
+        );
     }
 
     let latest_turn_start = ranges
@@ -429,36 +456,51 @@ fn build_summary_message(
     messages: &[Message],
     excluded_turn_groups: usize,
     cutoff: usize,
+    source_boundary_version: u64,
 ) -> Message {
-    let mut topics = Vec::new();
-    for message in messages {
-        if message.role != Role::User || is_system_reminder(message) || is_tool_result_only(message)
-        {
-            continue;
-        }
-        if let Some(text) = first_text(message) {
-            topics.push(clip_text(&text, SUMMARY_ITEM_CHARS));
-        }
-    }
-
-    let selected_topics = if topics.len() <= SUMMARY_MAX_ITEMS {
-        topics
+    let pairs = turn_group_ranges(messages)
+        .into_iter()
+        .filter_map(|(start, end)| {
+            let group = &messages[start..end];
+            let question = group.iter().find_map(|message| {
+                (message.role == Role::User
+                    && !is_system_reminder(message)
+                    && !is_tool_result_only(message))
+                .then(|| first_text(message))
+                .flatten()
+            })?;
+            let answer = group
+                .iter()
+                .filter(|message| message.role == Role::Assistant)
+                .filter_map(first_text)
+                .last()?;
+            Some((
+                clip_text(&question, SUMMARY_FIELD_CHARS),
+                clip_text(&answer, SUMMARY_FIELD_CHARS),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let selected_pairs = if pairs.len() <= SUMMARY_MAX_ITEMS {
+        pairs
     } else {
         let head = SUMMARY_MAX_ITEMS / 2;
         let tail = SUMMARY_MAX_ITEMS.saturating_sub(head);
-        topics
+        pairs
             .iter()
             .take(head)
-            .chain(topics.iter().rev().take(tail).rev())
+            .chain(pairs.iter().rev().take(tail).rev())
             .cloned()
             .collect()
     };
     let mut text = format!(
-        "[Automatic context summary. It may be stale. Full history remains in the canonical session and was not deleted.]\nOmitted completed turn groups: {excluded_turn_groups}. Source boundary: {cutoff}."
+        "[Automatic context summary. Full history remains in the canonical session and was not deleted.]\nSummary semantics: structural completed question-answer pairs; factual truth is not independently verified.\nOmitted completed turn groups: {excluded_turn_groups}. Source boundary: {cutoff}. Source boundary version: {source_boundary_version:016x}.\nIncluded complete question-answer pairs: {}.",
+        selected_pairs.len()
     );
-    for topic in selected_topics {
-        text.push_str("\n- Earlier user topic: ");
-        text.push_str(&topic);
+    for (question, answer) in selected_pairs {
+        text.push_str("\n- Q: ");
+        text.push_str(&question);
+        text.push_str("\n  A: ");
+        text.push_str(&answer);
     }
     marker_message(Role::User, &text)
 }
@@ -547,9 +589,17 @@ mod tests {
         None
     }
 
+    fn text_contains(messages: &[Message], needle: &str) -> bool {
+        messages.iter().any(|message| {
+            message.content.iter().any(
+                |block| matches!(block, ContentBlock::Text { text, .. } if text.contains(needle)),
+            )
+        })
+    }
+
     #[test]
     fn long_histories_are_bounded_without_mutating_input() {
-        for count in [100, 200] {
+        for count in [50, 100, 200] {
             let messages = groups(count);
             let before = serde_json::to_string(&messages).unwrap();
             let mut state = ProviderContextViewState::default();
@@ -560,6 +610,65 @@ mod tests {
             assert!(result.after_tokens < result.before_tokens);
             assert_eq!(serde_json::to_string(&messages).unwrap(), before);
         }
+    }
+
+    #[test]
+    fn summary_contains_source_boundary_and_question_answer_pairs() {
+        let messages = groups(30);
+        let mut state = ProviderContextViewState::default();
+        let result = state.project(&messages, 10_000, 0, 0);
+        let summary = result
+            .messages
+            .iter()
+            .find_map(first_text)
+            .expect("projection should contain a summary");
+
+        assert!(summary.contains("Source boundary version:"));
+        assert!(summary.contains("Q: question"));
+        assert!(summary.contains("A: answer"));
+        assert!(!summary.contains("Earlier user topic:"));
+    }
+
+    #[test]
+    fn changed_omitted_source_drops_stale_fact_from_summary_and_view() {
+        let mut messages = groups(30);
+        messages[1] = assistant("stale fact: the deployment is green");
+        let mut state = ProviderContextViewState::default();
+        let old = state.project(&messages, 10_000, 0, 0);
+        let old_summary = old
+            .messages
+            .iter()
+            .find_map(first_text)
+            .expect("initial projection should contain a summary");
+        assert!(old_summary.contains("stale fact: the deployment is green"));
+        let old_summary_source = old
+            .summary_source_version
+            .expect("initial projection should expose summary provenance");
+
+        messages[1] = assistant("fresh fact: the deployment is red");
+        let fresh = state.project(&messages, 10_000, 0, 0);
+
+        assert_ne!(fresh.source_version, old.source_version);
+        assert!(fresh.representation_changed);
+        assert!(text_contains(
+            &fresh.messages,
+            "fresh fact: the deployment is red"
+        ));
+        assert!(!text_contains(
+            &fresh.messages,
+            "stale fact: the deployment is green"
+        ));
+        let fresh_summary_source = fresh
+            .summary_source_version
+            .expect("fresh projection should expose summary provenance");
+        assert_ne!(fresh_summary_source, old_summary_source);
+        let fresh_summary = fresh
+            .messages
+            .iter()
+            .find_map(first_text)
+            .expect("fresh projection should contain a summary");
+        assert!(fresh_summary.contains(&format!("{:016x}", fresh_summary_source)));
+        assert!(!fresh_summary.contains(&format!("{:016x}", old_summary_source)));
     }
 
     #[test]
@@ -620,6 +729,7 @@ mod tests {
         let second = state.project(&messages, 10_000, 0, 0);
 
         assert!(!second.representation_changed);
+        assert_eq!(second.summary_source_version, first.summary_source_version);
         assert!(second.reason.starts_with("stable_tail_append"));
     }
 }

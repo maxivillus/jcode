@@ -893,6 +893,13 @@ impl Agent {
                     "summary_messages".to_string(),
                     result.summary_messages.to_string(),
                 ),
+                (
+                    "summary_source_version".to_string(),
+                    result
+                        .summary_source_version
+                        .map(|version| format!("{version:016x}"))
+                        .unwrap_or_else(|| "none".to_string()),
+                ),
                 ("unknown_relevance".to_string(), "not_proven".to_string()),
             ],
         );

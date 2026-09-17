@@ -129,6 +129,9 @@ async fn automatic_provider_view_changes_generation_only_when_view_changes() {
         messages.push(Message::user(&question));
         messages.push(Message::assistant_text(&answer));
     }
+    for message in &messages {
+        agent.add_message(message.role.clone(), message.content.clone());
+    }
     let history_before = serde_json::to_string(&agent.session.messages).unwrap();
 
     let first = agent.prepare_provider_context_view(&messages, 0, &[]);
