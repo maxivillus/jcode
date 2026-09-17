@@ -177,7 +177,7 @@ impl Agent {
                 if crate::config::config().features.message_timestamps {
                     Message::with_timestamps(&messages)
                 } else {
-                    messages.iter().cloned().collect()
+                    messages.to_vec()
                 };
             let mut ephemeral_signature_messages = Vec::new();
 
