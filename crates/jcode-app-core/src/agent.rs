@@ -3,6 +3,7 @@
 mod compaction;
 mod context_control;
 mod context_prune;
+mod context_telemetry;
 mod environment;
 mod inline_tail;
 mod interrupts;
@@ -19,6 +20,9 @@ mod turn_loops;
 mod turn_streaming_mpsc;
 mod utils;
 
+use self::context_telemetry::{
+    log_agent_provider_stream_lifecycle, log_request, record_and_log_usage,
+};
 use self::streaming::{send_stream_keepalive_mpsc, stream_keepalive_ticker};
 use self::tools::{
     cap_sdk_tool_content_for_history, cap_tool_output_for_history, print_tool_summary,
@@ -128,45 +132,6 @@ fn kv_cache_request_event(
         ephemeral_message_count: ephemeral_messages.len(),
         cache_generation: Some(cache_generation),
     }
-}
-
-fn log_agent_provider_stream_lifecycle(
-    level: logging::LogLevel,
-    agent: &Agent,
-    phase: &str,
-    api_start: Instant,
-    fields: Vec<(&str, String)>,
-) {
-    let mut owned = vec![
-        ("phase".to_string(), phase.to_string()),
-        ("provider".to_string(), agent.provider.name().to_string()),
-        ("model".to_string(), agent.provider.model()),
-        ("session_id".to_string(), agent.session.id.clone()),
-        (
-            "provider_session_id".to_string(),
-            agent
-                .provider_session_id
-                .clone()
-                .unwrap_or_else(|| "none".to_string()),
-        ),
-        (
-            "connection_type".to_string(),
-            agent
-                .last_connection_type
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-        ),
-        (
-            "elapsed_ms".to_string(),
-            api_start.elapsed().as_millis().to_string(),
-        ),
-    ];
-    owned.extend(
-        fields
-            .into_iter()
-            .map(|(key, value)| (key.to_string(), value)),
-    );
-    logging::event(level, "AGENT_PROVIDER_STREAM_LIFECYCLE", owned);
 }
 
 /// Token usage from the last API request
@@ -835,17 +800,17 @@ impl Agent {
         }
     }
 
-    pub(super) fn prepare_provider_context_view(
+    pub(super) fn project_context(
         &mut self,
         messages: &[Message],
-        system_prompt_tokens: usize,
+        split_prompt: &crate::prompt::SplitSystemPrompt,
         tools: &[ToolDefinition],
     ) -> Vec<Message> {
         let tool_definition_tokens = ToolDefinition::aggregate_prompt_token_estimate(tools);
         let result = self.provider_context_view.project(
             messages,
             self.provider.context_window(),
-            system_prompt_tokens,
+            split_prompt.estimated_tokens(),
             tool_definition_tokens,
         );
         if result.representation_changed {

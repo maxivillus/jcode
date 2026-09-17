@@ -5,7 +5,6 @@ use crate::tui::app as app_mod;
 use crate::tui::app::remote::input_dispatch::restore_pending_startup_prompt_echo;
 use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
-
 fn allow_runtime_identity_mismatch() -> bool {
     std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
 }
@@ -37,7 +36,6 @@ fn parse_release_semver(version: &str) -> Option<(u32, u32, u32)> {
     let patch = parts.next().unwrap_or("0").parse().ok()?;
     Some((major, minor, patch))
 }
-
 /// True when the connected server reports a clean release version strictly older
 /// than this client's own clean release version.
 ///
@@ -100,7 +98,6 @@ fn should_defer_history_for_runtime_identity_with_allow(
         None => false,
     }
 }
-
 /// The client's own version string, used for release-staleness comparison.
 ///
 /// Production always reads the compiled-in build metadata. A test-only env
@@ -115,7 +112,6 @@ fn client_release_version() -> String {
     }
     jcode_build_meta::version().to_string()
 }
-
 fn should_defer_history_for_runtime_identity(
     server_has_update: Option<bool>,
     server_version: Option<&str>,
@@ -912,7 +908,7 @@ pub(in crate::tui::app) fn handle_server_event(
             cache_generation,
         } => {
             remote.reset_call_output_tokens_seen();
-            app.begin_remote_kv_cache_request_with_generation(
+            app.begin_remote_kv_cache(
                 app_mod::KvCacheRequestSignature {
                     system_static_hash,
                     tools_hash,

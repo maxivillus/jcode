@@ -158,21 +158,15 @@ impl Agent {
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split(None);
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
-            let messages = self.prepare_provider_context_view(
-                &history_messages,
-                split_prompt.estimated_tokens(),
-                &tools,
-            );
+            let messages = self.project_context(&history_messages, &split_prompt, &tools);
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
             self.record_client_cache_request(&messages);
-
             // `messages` now owns the provider-facing request snapshot. Do not
             // retain the session's second, derived copy for the entire network
             // wait and response stream.
             self.session.release_provider_messages_cache();
-
             let mut cache_signature_messages =
                 if crate::config::config().features.message_timestamps {
                     Message::with_timestamps(&messages)
@@ -180,7 +174,6 @@ impl Agent {
                     messages.to_vec()
                 };
             let mut ephemeral_signature_messages = Vec::new();
-
             // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory: Vec<Message> = messages.clone();
             if let Some(memory) = memory_pending.as_ref() {
@@ -249,27 +242,7 @@ impl Agent {
             if !self.final_provider_revision_gate(context_revision) {
                 continue;
             }
-            crate::logging::event_debug(
-                "CONTEXT_PROVIDER_REQUEST",
-                vec![
-                    ("mode".to_string(), "mpsc".to_string()),
-                    ("revision".to_string(), context_revision.0.to_string()),
-                    (
-                        "estimated_input_tokens".to_string(),
-                        context_plan.estimated_input_tokens.to_string(),
-                    ),
-                    (
-                        "max_input_tokens".to_string(),
-                        context_plan.max_input_tokens.to_string(),
-                    ),
-                    ("message_count".to_string(), send_messages.len().to_string()),
-                    ("tool_count".to_string(), tools.len().to_string()),
-                    (
-                        "provider_session_present".to_string(),
-                        resume_session_id.is_some().to_string(),
-                    ),
-                ],
-            );
+            log_request("mpsc", self, context_plan, send_messages, &tools);
             let mut stream = {
                 let mut complete_future = std::pin::pin!(provider.complete_split(
                     send_messages,
@@ -1043,36 +1016,7 @@ impl Agent {
                 cache_read_input_tokens: usage_cache_read,
                 cache_creation_input_tokens: usage_cache_creation,
             };
-            let context_revision_accepted =
-                self.record_context_usage(context_revision, usage_input);
-            crate::logging::event_debug(
-                "CONTEXT_PROVIDER_USAGE",
-                vec![
-                    ("mode".to_string(), "mpsc".to_string()),
-                    ("revision".to_string(), context_revision.0.to_string()),
-                    (
-                        "input_tokens".to_string(),
-                        usage_input.unwrap_or(0).to_string(),
-                    ),
-                    (
-                        "output_tokens".to_string(),
-                        usage_output.unwrap_or(0).to_string(),
-                    ),
-                    (
-                        "cache_read_input_tokens".to_string(),
-                        usage_cache_read.unwrap_or(0).to_string(),
-                    ),
-                    (
-                        "cache_creation_input_tokens".to_string(),
-                        usage_cache_creation.unwrap_or(0).to_string(),
-                    ),
-                    (
-                        "context_revision_accepted".to_string(),
-                        context_revision_accepted.to_string(),
-                    ),
-                ],
-            );
-            if !context_revision_accepted {
+            if !record_and_log_usage(self, "mpsc", context_revision, usage_input) {
                 clear_stale_stream_text(&event_tx);
                 break;
             }

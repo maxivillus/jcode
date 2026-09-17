@@ -609,10 +609,7 @@ fn remote_cache_generation_change_clears_old_baseline_once() {
         Message::assistant_text("first answer"),
     ];
     let changed_signature = App::kv_cache_request_signature(&changed, &[], "system", "");
-    app.begin_remote_kv_cache_request_with_generation(
-        changed_signature.clone(),
-        Some(next_generation),
-    );
+    app.begin_remote_kv_cache(changed_signature.clone(), Some(next_generation));
 
     assert_eq!(app.kv_cache.cache_generation, next_generation);
     let request = app
@@ -623,7 +620,7 @@ fn remote_cache_generation_change_clears_old_baseline_once() {
     assert!(request.baseline.is_none());
     assert_eq!(request.baseline_messages_prefix_matches, None);
 
-    app.begin_remote_kv_cache_request_with_generation(changed_signature, Some(next_generation));
+    app.begin_remote_kv_cache(changed_signature, Some(next_generation));
     assert_eq!(
         app.kv_cache.cache_generation, next_generation,
         "the same generation must not trigger another reset"

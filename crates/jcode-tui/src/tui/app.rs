@@ -1792,69 +1792,6 @@ impl App {
         });
     }
 
-    #[cfg(test)]
-    pub(in crate::tui::app) fn begin_remote_kv_cache_request(
-        &mut self,
-        signature: KvCacheRequestSignature,
-    ) {
-        self.begin_remote_kv_cache_request_with_generation(signature, None);
-    }
-
-    pub(in crate::tui::app) fn begin_remote_kv_cache_request_with_generation(
-        &mut self,
-        signature: KvCacheRequestSignature,
-        cache_generation: Option<u64>,
-    ) {
-        if let Some(cache_generation) = cache_generation
-            && cache_generation != self.kv_cache.cache_generation
-        {
-            self.reset_provider_context_state();
-            self.kv_cache.cache_generation = cache_generation;
-        }
-
-        let turn_number = self
-            .display_messages
-            .iter()
-            .filter(|message| message.role == "user")
-            .count()
-            .max(1);
-        if self.kv_cache.kv_cache_turn_number == Some(turn_number) {
-            self.kv_cache.kv_cache_turn_call_index = self
-                .kv_cache
-                .kv_cache_turn_call_index
-                .saturating_add(1)
-                .max(1);
-        } else {
-            self.kv_cache.kv_cache_turn_number = Some(turn_number);
-            self.kv_cache.kv_cache_turn_call_index = 1;
-        }
-
-        let baseline = self.kv_cache_baseline_for_current_session();
-        let baseline_messages_prefix_matches = baseline
-            .as_ref()
-            .and_then(|baseline| baseline.signature.as_ref())
-            .map(|previous| Self::kv_cache_signatures_prefix_match(&signature, previous));
-        self.maybe_push_cold_cache_warning(
-            turn_number,
-            self.kv_cache.kv_cache_turn_call_index,
-            baseline.as_ref(),
-        );
-        self.pause_streaming_tps(false);
-        self.kv_cache.current_api_usage_recorded = false;
-        self.mark_stream_usage_call_boundary();
-        self.kv_cache.pending_kv_cache_request = Some(PendingKvCacheRequest {
-            turn_number,
-            call_index: self.kv_cache.kv_cache_turn_call_index,
-            provider: self.kv_cache_provider_name(),
-            model: self.kv_cache_provider_model(),
-            upstream_provider: self.upstream_provider.clone(),
-            signature: Some(signature),
-            baseline_messages_prefix_matches,
-            baseline,
-            cache_generation: self.kv_cache.cache_generation,
-        });
-    }
-
     /// Session id the next KV-cache baseline should be tagged with.
     ///
     /// A single `App` can stream several sessions over its lifetime (remote

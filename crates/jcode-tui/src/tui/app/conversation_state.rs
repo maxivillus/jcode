@@ -896,6 +896,135 @@ impl App {
         )));
         self.set_status_notice("Recovered session");
     }
+
+    pub(in crate::tui::app) fn prepare_provider_context_view(
+        &mut self,
+        messages: &[Message],
+        split_prompt: &crate::prompt::SplitSystemPrompt,
+        tools: &[ToolDefinition],
+    ) -> Vec<Message> {
+        let provider_context_limit = self.provider.context_window();
+        let tool_definition_tokens = ToolDefinition::aggregate_prompt_token_estimate(tools);
+        let result = self.provider_context_view.project(
+            messages,
+            provider_context_limit,
+            split_prompt.estimated_tokens(),
+            tool_definition_tokens,
+        );
+        if result.representation_changed {
+            self.advance_provider_context_generation();
+        }
+        crate::logging::event_debug(
+            "CONTEXT_AUTOMATIC_VIEW",
+            vec![
+                ("reason".to_string(), result.reason.clone()),
+                (
+                    "source_version".to_string(),
+                    format!("{:016x}", result.source_version),
+                ),
+                (
+                    "view_version".to_string(),
+                    format!("{:016x}", result.view_version),
+                ),
+                (
+                    "provider_context_generation".to_string(),
+                    self.kv_cache.cache_generation.to_string(),
+                ),
+                ("active".to_string(), result.active.to_string()),
+                (
+                    "before_tokens".to_string(),
+                    result.before_tokens.to_string(),
+                ),
+                ("after_tokens".to_string(), result.after_tokens.to_string()),
+                (
+                    "before_turn_groups".to_string(),
+                    result.before_turn_groups.to_string(),
+                ),
+                (
+                    "after_turn_groups".to_string(),
+                    result.after_turn_groups.to_string(),
+                ),
+                (
+                    "excluded_messages".to_string(),
+                    result.excluded_messages.to_string(),
+                ),
+                (
+                    "excluded_turn_groups".to_string(),
+                    result.excluded_turn_groups.to_string(),
+                ),
+                (
+                    "summary_messages".to_string(),
+                    result.summary_messages.to_string(),
+                ),
+                ("unknown_relevance".to_string(), "not_proven".to_string()),
+            ],
+        );
+        result.messages
+    }
+
+    #[cfg(test)]
+    pub(in crate::tui::app) fn begin_remote_kv_cache_request(
+        &mut self,
+        signature: KvCacheRequestSignature,
+    ) {
+        self.begin_remote_kv_cache(signature, None);
+    }
+
+    pub(in crate::tui::app) fn begin_remote_kv_cache(
+        &mut self,
+        signature: KvCacheRequestSignature,
+        cache_generation: Option<u64>,
+    ) {
+        if let Some(cache_generation) = cache_generation
+            && cache_generation != self.kv_cache.cache_generation
+        {
+            self.reset_provider_context_state();
+            self.kv_cache.cache_generation = cache_generation;
+        }
+
+        let turn_number = self
+            .display_messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .count()
+            .max(1);
+        if self.kv_cache.kv_cache_turn_number == Some(turn_number) {
+            self.kv_cache.kv_cache_turn_call_index = self
+                .kv_cache
+                .kv_cache_turn_call_index
+                .saturating_add(1)
+                .max(1);
+        } else {
+            self.kv_cache.kv_cache_turn_number = Some(turn_number);
+            self.kv_cache.kv_cache_turn_call_index = 1;
+        }
+
+        let baseline = self.kv_cache_baseline_for_current_session();
+        let baseline_messages_prefix_matches = baseline
+            .as_ref()
+            .and_then(|baseline| baseline.signature.as_ref())
+            .map(|previous| Self::kv_cache_signatures_prefix_match(&signature, previous));
+        self.maybe_push_cold_cache_warning(
+            turn_number,
+            self.kv_cache.kv_cache_turn_call_index,
+            baseline.as_ref(),
+        );
+        self.pause_streaming_tps(false);
+        self.kv_cache.current_api_usage_recorded = false;
+        self.mark_stream_usage_call_boundary();
+
+        self.kv_cache.pending_kv_cache_request = Some(PendingKvCacheRequest {
+            turn_number,
+            call_index: self.kv_cache.kv_cache_turn_call_index,
+            provider: self.kv_cache_provider_name(),
+            model: self.kv_cache_provider_model(),
+            upstream_provider: self.upstream_provider.clone(),
+            signature: Some(signature),
+            baseline_messages_prefix_matches,
+            baseline,
+            cache_generation: self.kv_cache.cache_generation,
+        });
+    }
 }
 
 #[cfg(test)]

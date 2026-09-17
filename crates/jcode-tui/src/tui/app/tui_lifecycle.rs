@@ -388,7 +388,6 @@ impl App {
             crate::session::SessionImproveMode::RefactorRun => ImproveMode::RefactorRun,
             crate::session::SessionImproveMode::RefactorPlan => ImproveMode::RefactorPlan,
         });
-
         crate::logging::info("App::new_minimal_with_session: skipping skill/prompt bootstrap");
         crate::telemetry::begin_session_with_parent(
             provider.name(),
@@ -396,7 +395,6 @@ impl App {
             session.parent_id.clone(),
             false,
         );
-
         let mut app = Self {
             provider,
             registry,
@@ -430,8 +428,7 @@ impl App {
             status_detail: None,
             token_accounting: TokenAccounting::default(),
             kv_cache: KvCacheState::default(),
-            provider_context_view:
-                crate::agent::provider_context_view::ProviderContextViewState::default(),
+            provider_context_view: Default::default(),
             cost: CostState::default(),
             context_limit,
             context_warning_shown: false,
@@ -881,8 +878,7 @@ impl App {
             status_detail: None,
             token_accounting: TokenAccounting::default(),
             kv_cache: KvCacheState::default(),
-            provider_context_view:
-                crate::agent::provider_context_view::ProviderContextViewState::default(),
+            provider_context_view: Default::default(),
             cost: CostState::default(),
             context_limit,
             context_warning_shown: false,

@@ -134,18 +134,22 @@ async fn automatic_provider_view_changes_generation_only_when_view_changes() {
     }
     let history_before = serde_json::to_string(&agent.session.messages).unwrap();
 
-    let first = agent.prepare_provider_context_view(&messages, 0, &[]);
+    let first = agent.project_context(&messages, &Default::default(), &[]);
     assert!(first.len() < messages.len());
     assert_eq!(agent.provider_context_generation(), 0);
 
     messages.push(Message::user("new question"));
     messages.push(Message::assistant_text("new answer"));
-    let append_only_len = agent.prepare_provider_context_view(&messages, 0, &[]).len();
+    let append_only_len = agent
+        .project_context(&messages, &Default::default(), &[])
+        .len();
     assert!(append_only_len > first.len());
     assert_eq!(agent.provider_context_generation(), 0);
 
     messages[0] = Message::user("changed older question");
-    let changed_len = agent.prepare_provider_context_view(&messages, 0, &[]).len();
+    let changed_len = agent
+        .project_context(&messages, &Default::default(), &[])
+        .len();
     assert!(changed_len > 0);
     assert_eq!(agent.provider_context_generation(), 1);
     assert_eq!(

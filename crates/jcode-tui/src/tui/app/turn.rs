@@ -1,72 +1,6 @@
 use super::*;
-use crate::message::ToolDefinition;
 
 impl App {
-    fn prepare_provider_context_view(
-        &mut self,
-        messages: &[Message],
-        system_prompt_tokens: usize,
-        tools: &[ToolDefinition],
-    ) -> Vec<Message> {
-        let provider_context_limit = self.provider.context_window();
-        let tool_definition_tokens = ToolDefinition::aggregate_prompt_token_estimate(tools);
-        let result = self.provider_context_view.project(
-            messages,
-            provider_context_limit,
-            system_prompt_tokens,
-            tool_definition_tokens,
-        );
-        if result.representation_changed {
-            self.advance_provider_context_generation();
-        }
-        crate::logging::event_debug(
-            "CONTEXT_AUTOMATIC_VIEW",
-            vec![
-                ("reason".to_string(), result.reason.clone()),
-                (
-                    "source_version".to_string(),
-                    format!("{:016x}", result.source_version),
-                ),
-                (
-                    "view_version".to_string(),
-                    format!("{:016x}", result.view_version),
-                ),
-                (
-                    "provider_context_generation".to_string(),
-                    self.kv_cache.cache_generation.to_string(),
-                ),
-                ("active".to_string(), result.active.to_string()),
-                (
-                    "before_tokens".to_string(),
-                    result.before_tokens.to_string(),
-                ),
-                ("after_tokens".to_string(), result.after_tokens.to_string()),
-                (
-                    "before_turn_groups".to_string(),
-                    result.before_turn_groups.to_string(),
-                ),
-                (
-                    "after_turn_groups".to_string(),
-                    result.after_turn_groups.to_string(),
-                ),
-                (
-                    "excluded_messages".to_string(),
-                    result.excluded_messages.to_string(),
-                ),
-                (
-                    "excluded_turn_groups".to_string(),
-                    result.excluded_turn_groups.to_string(),
-                ),
-                (
-                    "summary_messages".to_string(),
-                    result.summary_messages.to_string(),
-                ),
-                ("unknown_relevance".to_string(), "not_proven".to_string()),
-            ],
-        );
-        result.messages
-    }
-
     pub(super) fn append_current_turn_system_reminder(
         &self,
         split: &mut crate::prompt::SplitSystemPrompt,
@@ -146,11 +80,8 @@ impl App {
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt =
                 self.build_system_prompt_split(memory_pending.as_ref().map(|p| p.prompt.as_str()));
-            let provider_messages = self.prepare_provider_context_view(
-                &provider_messages,
-                split_prompt.estimated_tokens(),
-                &tools,
-            );
+            let provider_messages =
+                self.prepare_provider_context_view(&provider_messages, &split_prompt, &tools);
             self.context_info.tool_defs_count = tools.len();
             self.context_info.tool_defs_chars = ToolDefinition::aggregate_prompt_chars(&tools);
             if let Some(pending) = &memory_pending {
@@ -169,7 +100,6 @@ impl App {
                 provider_messages.len()
             ));
             let api_start = std::time::Instant::now();
-
             // Clone data needed for the API call to avoid borrow issues
             // The future would hold references across the select! which conflicts with handle_key
             let provider = self.provider.clone();

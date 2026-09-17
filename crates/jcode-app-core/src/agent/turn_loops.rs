@@ -86,18 +86,12 @@ impl Agent {
             let tools = self.tool_definitions().await;
             let history_messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
-            let memory_pending = self.build_memory_prompt_nonblocking_shared(
-                std::sync::Arc::clone(&history_messages),
-                None,
-            );
+            let memory_pending =
+                self.build_memory_prompt_nonblocking_shared(history_messages.clone(), None);
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split(None);
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
-            let messages = self.prepare_provider_context_view(
-                &history_messages,
-                split_prompt.estimated_tokens(),
-                &tools,
-            );
+            let messages = self.project_context(&history_messages, &split_prompt, &tools);
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
@@ -106,7 +100,6 @@ impl Agent {
             // The request snapshot now owns everything the provider needs. Drop
             // the session's derived transcript copy before the network wait.
             self.session.release_provider_messages_cache();
-
             // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory: Vec<Message> = messages;
             if let Some(memory) = memory_pending.as_ref() {
@@ -167,27 +160,7 @@ impl Agent {
             if !self.final_provider_revision_gate(context_revision) {
                 continue;
             }
-            crate::logging::event_debug(
-                "CONTEXT_PROVIDER_REQUEST",
-                vec![
-                    ("mode".to_string(), "blocking".to_string()),
-                    ("revision".to_string(), context_revision.0.to_string()),
-                    (
-                        "estimated_input_tokens".to_string(),
-                        context_plan.estimated_input_tokens.to_string(),
-                    ),
-                    (
-                        "max_input_tokens".to_string(),
-                        context_plan.max_input_tokens.to_string(),
-                    ),
-                    ("message_count".to_string(), send_messages.len().to_string()),
-                    ("tool_count".to_string(), tools.len().to_string()),
-                    (
-                        "provider_session_present".to_string(),
-                        self.provider_session_id.is_some().to_string(),
-                    ),
-                ],
-            );
+            log_request("blocking", self, context_plan, send_messages, &tools);
             let mut stream = match self
                 .provider
                 .complete_split(
@@ -794,36 +767,7 @@ impl Agent {
                 cache_read_input_tokens: usage_cache_read,
                 cache_creation_input_tokens: usage_cache_creation,
             };
-            let context_revision_accepted =
-                self.record_context_usage(context_revision, usage_input);
-            crate::logging::event_debug(
-                "CONTEXT_PROVIDER_USAGE",
-                vec![
-                    ("mode".to_string(), "blocking".to_string()),
-                    ("revision".to_string(), context_revision.0.to_string()),
-                    (
-                        "input_tokens".to_string(),
-                        usage_input.unwrap_or(0).to_string(),
-                    ),
-                    (
-                        "output_tokens".to_string(),
-                        usage_output.unwrap_or(0).to_string(),
-                    ),
-                    (
-                        "cache_read_input_tokens".to_string(),
-                        usage_cache_read.unwrap_or(0).to_string(),
-                    ),
-                    (
-                        "cache_creation_input_tokens".to_string(),
-                        usage_cache_creation.unwrap_or(0).to_string(),
-                    ),
-                    (
-                        "context_revision_accepted".to_string(),
-                        context_revision_accepted.to_string(),
-                    ),
-                ],
-            );
-            if !context_revision_accepted {
+            if !record_and_log_usage(self, "blocking", context_revision, usage_input) {
                 break;
             }
 

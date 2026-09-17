@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::task::JoinHandle;
 
+mod compaction_telemetry;
 pub use jcode_compaction_core::{
     CHARS_PER_TOKEN, COMPACTION_THRESHOLD, CRITICAL_THRESHOLD, CompactionAction, CompactionEvent,
     CompactionStats, DEFAULT_TOKEN_BUDGET, EMBED_MAX_CHARS_PER_MSG, EMBEDDING_HISTORY_WINDOW,
@@ -39,58 +40,8 @@ pub use jcode_compaction_core::{
     semantic_cache_key, semantic_goal_text, semantic_message_text, strip_large_images_in_contents,
     summary_payload_char_count,
 };
-
 const HARD_THRESHOLD_PENDING_WAIT_MS: u64 = 15_000;
 const HARD_THRESHOLD_PENDING_POLL_MS: u64 = 50;
-
-fn optional_metric<T: ToString>(value: Option<T>) -> String {
-    value
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "none".to_string())
-}
-
-fn log_compaction_event(mode: &str, event: &CompactionEvent) {
-    crate::logging::event_info(
-        "CONTEXT_COMPACTION_APPLIED",
-        vec![
-            ("mode".to_string(), mode.to_string()),
-            (
-                "trigger".to_string(),
-                crate::logging::truncate_for_log(&event.trigger, 80),
-            ),
-            ("pre_tokens".to_string(), optional_metric(event.pre_tokens)),
-            (
-                "post_tokens".to_string(),
-                optional_metric(event.post_tokens),
-            ),
-            (
-                "tokens_saved".to_string(),
-                optional_metric(event.tokens_saved),
-            ),
-            (
-                "duration_ms".to_string(),
-                optional_metric(event.duration_ms),
-            ),
-            (
-                "messages_dropped".to_string(),
-                optional_metric(event.messages_dropped),
-            ),
-            (
-                "messages_compacted".to_string(),
-                optional_metric(event.messages_compacted),
-            ),
-            (
-                "summary_chars".to_string(),
-                optional_metric(event.summary_chars),
-            ),
-            (
-                "active_messages".to_string(),
-                optional_metric(event.active_messages),
-            ),
-        ],
-    );
-}
-
 /// Result from background compaction task
 struct CompactionResult {
     summary_text: String,
@@ -99,7 +50,6 @@ struct CompactionResult {
     duration_ms: u64,
     summarized_messages: usize,
 }
-
 struct CompactionOutcomeLog<'a> {
     trigger: &'a str,
     pre_tokens: u64,
@@ -1278,9 +1228,7 @@ impl CompactionManager {
                         .map(|summary| summary.text.len()),
                     active_messages: Some(self.active_messages_count()),
                 });
-                if let Some(event) = self.last_compaction.as_ref() {
-                    log_compaction_event("background", event);
-                }
+                compaction_telemetry::event("background", self.last_compaction.as_ref());
                 crate::logging::info(&format!(
                     "[TIMING] compaction_complete: trigger={}, duration={}ms, pre_tokens={}, post_tokens={}, tokens_saved={}, messages_compacted={}, summary_chars={}, active_messages={}",
                     self.last_compaction
@@ -1599,9 +1547,7 @@ impl CompactionManager {
                 .map(|summary| summary.text.len()),
             active_messages: Some(self.active_messages_count()),
         });
-        if let Some(event) = self.last_compaction.as_ref() {
-            log_compaction_event("hard", event);
-        }
+        compaction_telemetry::event("hard", self.last_compaction.as_ref());
         self.log_compaction_outcome(CompactionOutcomeLog {
             trigger: "hard_compact",
             pre_tokens,
