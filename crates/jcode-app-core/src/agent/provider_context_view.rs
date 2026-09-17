@@ -24,6 +24,8 @@ const TOOL_RESULT_OMITTED_NOTE: &str =
 const MEMORY_OMITTED_NOTE: &str =
     "[older memory injection omitted automatically; canonical session retains it]";
 
+type RenderedProjection = (Vec<Message>, usize, usize, usize);
+
 #[derive(Debug, Clone, Copy)]
 struct Boundary {
     message_count: usize,
@@ -139,7 +141,7 @@ impl ProviderContextViewState {
                 cutoff
                     .and_then(|value| value.checked_sub(1))
                     .and_then(|index| source_prefix_hashes.get(index).copied())
-                    .unwrap_or_default(),
+                    .unwrap_or(0),
             )
         } else {
             None
@@ -222,7 +224,7 @@ fn choose_projection(
     messages: &[Message],
     target_tokens: usize,
     source_prefix_hashes: &[u64],
-) -> Option<(usize, (Vec<Message>, usize, usize, usize))> {
+) -> Option<(usize, RenderedProjection)> {
     let ranges = turn_group_ranges(messages);
     if ranges.len() <= RECENT_TURN_GROUPS {
         return None;
@@ -244,7 +246,7 @@ fn render_projection(
     messages: &[Message],
     cutoff: usize,
     source_prefix_hashes: &[u64],
-) -> (Vec<Message>, usize, usize, usize) {
+) -> RenderedProjection {
     let cutoff = cutoff.min(messages.len());
     let ranges = turn_group_ranges(messages);
     let excluded_turn_groups = ranges
@@ -271,7 +273,7 @@ fn render_projection(
         let source_boundary_version = cutoff
             .checked_sub(1)
             .and_then(|index| source_prefix_hashes.get(index).copied())
-            .unwrap_or_default();
+            .unwrap_or(0);
         output[index] = build_summary_message(
             &omitted,
             excluded_turn_groups,
@@ -473,7 +475,7 @@ fn build_summary_message(
                 .iter()
                 .filter(|message| message.role == Role::Assistant)
                 .filter_map(first_text)
-                .last()?;
+                .next_back()?;
             Some((
                 clip_text(&question, SUMMARY_FIELD_CHARS),
                 clip_text(&answer, SUMMARY_FIELD_CHARS),
