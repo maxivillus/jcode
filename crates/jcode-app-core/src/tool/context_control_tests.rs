@@ -87,7 +87,8 @@ async fn registry_registers_context_tools_and_schemas() {
                 "propose_patch",
                 "record_observation",
                 "retrieve_evidence",
-                "reconcile"
+                "reconcile",
+                "commit_round"
             ]),
         ),
     ] {

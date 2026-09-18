@@ -106,6 +106,27 @@ fn prompt_summary_replaces_old_observation_and_redacts_stale_value() {
 }
 
 #[test]
+fn prompt_summary_omits_summary_when_source_revision_changes() {
+    let mut state = ExecutionState::new("sample-workflow").unwrap();
+    let mut initial = ExecutionStatePatch::new("sample-workflow", state.revision);
+    initial.source_revision = Some(PatchValue::Set("source:v1".to_string()));
+    initial.context_summary = Some(PatchValue::Set("old summary value".to_string()));
+    initial.summary_source_revision = Some(PatchValue::Set("source:v1".to_string()));
+    state.apply_patch(&initial).unwrap();
+
+    let current = state.prompt_summary();
+    assert!(current.contains("old summary value"));
+
+    let mut changed = ExecutionStatePatch::new("sample-workflow", state.revision);
+    changed.source_revision = Some(PatchValue::Set("source:v2".to_string()));
+    state.apply_patch(&changed).unwrap();
+
+    let stale = state.prompt_summary();
+    assert!(stale.contains("summary revision is stale or unknown"));
+    assert!(!stale.contains("old summary value"));
+}
+
+#[test]
 fn contract_serializes_all_machine_readable_fields() {
     let state = ExecutionState::new("code-review").unwrap();
     let encoded = serde_json::to_value(state.contract()).unwrap();
@@ -136,7 +157,8 @@ fn contract_serializes_all_machine_readable_fields() {
             "propose_patch",
             "record_observation",
             "retrieve_evidence",
-            "reconcile"
+            "reconcile",
+            "commit_round"
         ])
     );
 }

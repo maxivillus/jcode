@@ -18,6 +18,9 @@ pub const MAX_WORKFLOW_OBSERVATION_SOURCE_CHARS: usize = 128;
 pub const MAX_WORKFLOW_OBSERVATION_REVISION_CHARS: usize = 128;
 pub const MAX_WORKFLOW_OBSERVATION_STATUS_CHARS: usize = 32;
 pub const MAX_WORKFLOW_OBSERVED_AT_CHARS: usize = 64;
+pub const MAX_WORKFLOW_SUMMARY_CHARS: usize = MAX_EXECUTION_STATE_TEXT_CHARS;
+pub const MAX_WORKFLOW_ACTION_CHARS: usize = 128;
+pub const MAX_WORKFLOW_ACTION_RESULT_CHARS: usize = 512;
 /// Верхняя граница текста state, который можно добавить в prompt модели.
 ///
 /// Проекция намеренно меньше полного machine-readable state: она сохраняет
@@ -28,19 +31,22 @@ pub const MAX_EXECUTION_STATE_PROMPT_CHARS: usize = 2048;
 const MAX_EXECUTION_STATE_PROMPT_ITEM_CHARS: usize = 192;
 const MAX_EXECUTION_STATE_PROMPT_ITEMS: usize = 8;
 
-const EXECUTION_STATE_ALLOWED_ACTIONS: [&str; 5] = [
+const EXECUTION_STATE_ALLOWED_ACTIONS: [&str; 6] = [
     "get_state",
     "propose_patch",
     "record_observation",
     "retrieve_evidence",
     "reconcile",
+    "commit_round",
 ];
-const EXECUTION_STATE_TEXT_FIELDS: [&str; 12] = [
+const EXECUTION_STATE_TEXT_FIELDS: [&str; 17] = [
     "state_schema",
     "goal",
     "phase",
     "next_action",
     "source_revision",
+    "context_summary",
+    "summary_source_revision",
     "owner",
     "lease",
     "last_observation",
@@ -48,6 +54,9 @@ const EXECUTION_STATE_TEXT_FIELDS: [&str; 12] = [
     "last_observation_revision",
     "observation_status",
     "observed_at",
+    "last_action",
+    "last_action_status",
+    "last_action_result",
 ];
 const EXECUTION_STATE_LIST_FIELDS: [&str; 8] = [
     "acceptance_criteria",
@@ -60,7 +69,7 @@ const EXECUTION_STATE_LIST_FIELDS: [&str; 8] = [
     "evidence_refs",
 ];
 const EXECUTION_STATE_NUMERIC_FIELDS: [&str; 2] = ["schema_version", "revision"];
-const EXECUTION_STATE_FIELDS: [&str; 22] = [
+const EXECUTION_STATE_FIELDS: [&str; 27] = [
     "schema_version",
     "state_schema",
     "revision",
@@ -75,11 +84,16 @@ const EXECUTION_STATE_FIELDS: [&str; 22] = [
     "blockers",
     "next_action",
     "source_revision",
+    "context_summary",
+    "summary_source_revision",
     "last_observation",
     "observation_source",
     "last_observation_revision",
     "observation_status",
     "observed_at",
+    "last_action",
+    "last_action_status",
+    "last_action_result",
     "evidence_refs",
     "owner",
     "lease",
@@ -88,6 +102,9 @@ const EXECUTION_STATE_FIELDS: [&str; 22] = [
 pub const OBSERVATION_STATUS_CURRENT: &str = "current";
 pub const OBSERVATION_STATUS_STALE: &str = "stale";
 pub const OBSERVATION_STATUS_CONTRADICTED: &str = "contradicted";
+pub const ACTION_STATUS_PLANNED: &str = "planned";
+pub const ACTION_STATUS_COMPLETED: &str = "completed";
+pub const ACTION_STATUS_FAILED: &str = "failed";
 
 /// Revision структурированного состояния workflow run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -333,6 +350,10 @@ pub struct ExecutionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_source_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_observation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation_source: Option<String>,
@@ -342,6 +363,12 @@ pub struct ExecutionState {
     pub observation_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_action_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_action_result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_refs: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -374,11 +401,16 @@ impl Default for ExecutionState {
             blockers: None,
             next_action: None,
             source_revision: None,
+            context_summary: None,
+            summary_source_revision: None,
             last_observation: None,
             observation_source: None,
             last_observation_revision: None,
             observation_status: None,
             observed_at: None,
+            last_action: None,
+            last_action_status: None,
+            last_action_result: None,
             evidence_refs: None,
             owner: None,
             lease: None,
@@ -440,11 +472,16 @@ impl ExecutionState {
         self.validate_optional_list("blockers", &self.blockers)?;
         self.validate_optional_text("next_action", &self.next_action)?;
         self.validate_optional_text("source_revision", &self.source_revision)?;
+        self.validate_optional_text("context_summary", &self.context_summary)?;
+        self.validate_optional_text("summary_source_revision", &self.summary_source_revision)?;
         self.validate_optional_text("last_observation", &self.last_observation)?;
         self.validate_optional_text("observation_source", &self.observation_source)?;
         self.validate_optional_text("last_observation_revision", &self.last_observation_revision)?;
         self.validate_optional_text("observation_status", &self.observation_status)?;
         self.validate_optional_text("observed_at", &self.observed_at)?;
+        self.validate_optional_text("last_action", &self.last_action)?;
+        self.validate_optional_text("last_action_status", &self.last_action_status)?;
+        self.validate_optional_text("last_action_result", &self.last_action_result)?;
         if let Some(status) = self.observation_status.as_deref()
             && !matches!(
                 status,
@@ -454,6 +491,16 @@ impl ExecutionState {
             )
         {
             return Err(ExecutionStateError::InvalidObservationStatus {
+                actual: status.to_string(),
+            });
+        }
+        if let Some(status) = self.last_action_status.as_deref()
+            && !matches!(
+                status,
+                ACTION_STATUS_PLANNED | ACTION_STATUS_COMPLETED | ACTION_STATUS_FAILED
+            )
+        {
+            return Err(ExecutionStateError::InvalidActionStatus {
                 actual: status.to_string(),
             });
         }
@@ -530,11 +577,16 @@ impl ExecutionState {
                 "blockers" => self.blockers.is_some(),
                 "next_action" => self.next_action.is_some(),
                 "source_revision" => self.source_revision.is_some(),
+                "context_summary" => self.context_summary.is_some(),
+                "summary_source_revision" => self.summary_source_revision.is_some(),
                 "last_observation" => self.last_observation.is_some(),
                 "observation_source" => self.observation_source.is_some(),
                 "last_observation_revision" => self.last_observation_revision.is_some(),
                 "observation_status" => self.observation_status.is_some(),
                 "observed_at" => self.observed_at.is_some(),
+                "last_action" => self.last_action.is_some(),
+                "last_action_status" => self.last_action_status.is_some(),
+                "last_action_result" => self.last_action_result.is_some(),
                 "evidence_refs" => self.evidence_refs.is_some(),
                 "owner" => self.owner.is_some(),
                 "lease" => self.lease.is_some(),
@@ -602,6 +654,31 @@ impl ExecutionState {
         );
         append_prompt_optional_line(
             &mut summary,
+            "summary_source_revision",
+            self.summary_source_revision.as_deref(),
+        );
+        match (
+            self.context_summary.as_deref(),
+            self.summary_source_revision.as_deref(),
+            self.source_revision.as_deref(),
+        ) {
+            (Some(value), Some(summary_revision), Some(source_revision))
+                if summary_revision == source_revision =>
+            {
+                append_prompt_line(&mut summary, "context_summary", value);
+            }
+            (Some(value), None, None) => {
+                append_prompt_line(&mut summary, "context_summary", value);
+            }
+            (Some(_), _, _) => append_prompt_line(
+                &mut summary,
+                "context_summary",
+                "[value omitted because summary revision is stale or unknown]",
+            ),
+            _ => {}
+        }
+        append_prompt_optional_line(
+            &mut summary,
             "observation_status",
             self.observation_status.as_deref(),
         );
@@ -630,6 +707,17 @@ impl ExecutionState {
                 self.last_observation.as_deref(),
             ),
         }
+        append_prompt_optional_line(&mut summary, "last_action", self.last_action.as_deref());
+        append_prompt_optional_line(
+            &mut summary,
+            "last_action_status",
+            self.last_action_status.as_deref(),
+        );
+        append_prompt_optional_line(
+            &mut summary,
+            "last_action_result",
+            self.last_action_result.as_deref(),
+        );
         summary
     }
 
@@ -820,6 +908,18 @@ pub struct ExecutionStatePatch {
         deserialize_with = "deserialize_optional_patch",
         skip_serializing_if = "Option::is_none"
     )]
+    pub context_summary: OptionalPatch<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_patch",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub summary_source_revision: OptionalPatch<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_patch",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub last_observation: OptionalPatch<String>,
     #[serde(
         default,
@@ -845,6 +945,24 @@ pub struct ExecutionStatePatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub observed_at: OptionalPatch<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_patch",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_action: OptionalPatch<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_patch",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_action_status: OptionalPatch<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_patch",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_action_result: OptionalPatch<String>,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_patch",
@@ -882,11 +1000,16 @@ impl Default for ExecutionStatePatch {
             blockers: None,
             next_action: None,
             source_revision: None,
+            context_summary: None,
+            summary_source_revision: None,
             last_observation: None,
             observation_source: None,
             last_observation_revision: None,
             observation_status: None,
             observed_at: None,
+            last_action: None,
+            last_action_status: None,
+            last_action_result: None,
             evidence_refs: None,
             owner: None,
             lease: None,
@@ -915,11 +1038,16 @@ impl ExecutionStatePatch {
             && self.blockers.is_none()
             && self.next_action.is_none()
             && self.source_revision.is_none()
+            && self.context_summary.is_none()
+            && self.summary_source_revision.is_none()
             && self.last_observation.is_none()
             && self.observation_source.is_none()
             && self.last_observation_revision.is_none()
             && self.observation_status.is_none()
             && self.observed_at.is_none()
+            && self.last_action.is_none()
+            && self.last_action_status.is_none()
+            && self.last_action_result.is_none()
             && self.evidence_refs.is_none()
             && self.owner.is_none()
             && self.lease.is_none()
@@ -949,11 +1077,16 @@ impl ExecutionStatePatch {
         validate_patch_list("blockers", &self.blockers)?;
         validate_patch_text("next_action", &self.next_action)?;
         validate_patch_text("source_revision", &self.source_revision)?;
+        validate_patch_text("context_summary", &self.context_summary)?;
+        validate_patch_text("summary_source_revision", &self.summary_source_revision)?;
         validate_patch_text("last_observation", &self.last_observation)?;
         validate_patch_text("observation_source", &self.observation_source)?;
         validate_patch_text("last_observation_revision", &self.last_observation_revision)?;
         validate_patch_text("observation_status", &self.observation_status)?;
         validate_patch_text("observed_at", &self.observed_at)?;
+        validate_patch_text("last_action", &self.last_action)?;
+        validate_patch_text("last_action_status", &self.last_action_status)?;
+        validate_patch_text("last_action_result", &self.last_action_result)?;
         if let Some(PatchValue::Set(status)) = &self.observation_status
             && !matches!(
                 status.as_str(),
@@ -963,6 +1096,16 @@ impl ExecutionStatePatch {
             )
         {
             return Err(ExecutionStateError::InvalidObservationStatus {
+                actual: status.clone(),
+            });
+        }
+        if let Some(PatchValue::Set(status)) = &self.last_action_status
+            && !matches!(
+                status.as_str(),
+                ACTION_STATUS_PLANNED | ACTION_STATUS_COMPLETED | ACTION_STATUS_FAILED
+            )
+        {
+            return Err(ExecutionStateError::InvalidActionStatus {
                 actual: status.clone(),
             });
         }
@@ -988,6 +1131,11 @@ impl ExecutionStatePatch {
         apply_list_patch(&mut state.blockers, &self.blockers);
         apply_text_patch(&mut state.next_action, &self.next_action);
         apply_text_patch(&mut state.source_revision, &self.source_revision);
+        apply_text_patch(&mut state.context_summary, &self.context_summary);
+        apply_text_patch(
+            &mut state.summary_source_revision,
+            &self.summary_source_revision,
+        );
         apply_text_patch(&mut state.last_observation, &self.last_observation);
         apply_text_patch(&mut state.observation_source, &self.observation_source);
         apply_text_patch(
@@ -996,6 +1144,9 @@ impl ExecutionStatePatch {
         );
         apply_text_patch(&mut state.observation_status, &self.observation_status);
         apply_text_patch(&mut state.observed_at, &self.observed_at);
+        apply_text_patch(&mut state.last_action, &self.last_action);
+        apply_text_patch(&mut state.last_action_status, &self.last_action_status);
+        apply_text_patch(&mut state.last_action_result, &self.last_action_result);
         apply_list_patch(&mut state.evidence_refs, &self.evidence_refs);
         apply_text_patch(&mut state.owner, &self.owner);
         apply_text_patch(&mut state.lease, &self.lease);
@@ -1041,6 +1192,9 @@ pub enum ExecutionStateError {
         field: String,
     },
     InvalidObservationStatus {
+        actual: String,
+    },
+    InvalidActionStatus {
         actual: String,
     },
     RequiredFieldMissing {
@@ -1115,6 +1269,9 @@ impl fmt::Display for ExecutionStateError {
                 formatter,
                 "workflow observation has invalid status {actual:?}"
             ),
+            Self::InvalidActionStatus { actual } => {
+                write!(formatter, "workflow action has invalid status {actual:?}")
+            }
             Self::RequiredFieldMissing { field } => write!(
                 formatter,
                 "execution state required field {field} is missing"
@@ -1158,11 +1315,16 @@ fn default_field_limits() -> BTreeMap<String, ExecutionStateFieldLimit> {
         "phase",
         "next_action",
         "source_revision",
+        "context_summary",
+        "summary_source_revision",
         "last_observation",
         "observation_source",
         "last_observation_revision",
         "observation_status",
         "observed_at",
+        "last_action",
+        "last_action_status",
+        "last_action_result",
         "owner",
         "lease",
     ] {
@@ -1195,6 +1357,26 @@ fn default_field_limits() -> BTreeMap<String, ExecutionStateFieldLimit> {
     limits.insert(
         "observed_at".to_string(),
         ExecutionStateFieldLimit::text(MAX_WORKFLOW_OBSERVED_AT_CHARS),
+    );
+    limits.insert(
+        "context_summary".to_string(),
+        ExecutionStateFieldLimit::text(MAX_WORKFLOW_SUMMARY_CHARS),
+    );
+    limits.insert(
+        "summary_source_revision".to_string(),
+        ExecutionStateFieldLimit::text(MAX_WORKFLOW_OBSERVATION_REVISION_CHARS),
+    );
+    limits.insert(
+        "last_action".to_string(),
+        ExecutionStateFieldLimit::text(MAX_WORKFLOW_ACTION_CHARS),
+    );
+    limits.insert(
+        "last_action_status".to_string(),
+        ExecutionStateFieldLimit::text(MAX_WORKFLOW_OBSERVATION_STATUS_CHARS),
+    );
+    limits.insert(
+        "last_action_result".to_string(),
+        ExecutionStateFieldLimit::text(MAX_WORKFLOW_ACTION_RESULT_CHARS),
     );
     limits
 }

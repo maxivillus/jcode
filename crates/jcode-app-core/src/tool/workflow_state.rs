@@ -4,9 +4,12 @@ use super::{
 };
 use crate::context::ContextPlane;
 use crate::execution_state::{
+    ACTION_STATUS_COMPLETED, ACTION_STATUS_FAILED, ACTION_STATUS_PLANNED,
+    MAX_WORKFLOW_ACTION_CHARS, MAX_WORKFLOW_ACTION_RESULT_CHARS,
     MAX_WORKFLOW_OBSERVATION_REVISION_CHARS, MAX_WORKFLOW_OBSERVATION_SOURCE_CHARS,
-    MAX_WORKFLOW_OBSERVED_AT_CHARS, OBSERVATION_STATUS_CONTRADICTED, OBSERVATION_STATUS_CURRENT,
-    OBSERVATION_STATUS_STALE, PatchValue, WorkflowRunState, WorkflowStatePatch,
+    MAX_WORKFLOW_OBSERVED_AT_CHARS, MAX_WORKFLOW_SUMMARY_CHARS, OBSERVATION_STATUS_CONTRADICTED,
+    OBSERVATION_STATUS_CURRENT, OBSERVATION_STATUS_STALE, PatchValue, WorkflowRunState,
+    WorkflowStatePatch,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -34,6 +37,33 @@ struct WorkflowStateInput {
     observation: Option<ObservationInput>,
     #[serde(default)]
     expected: ReconcileExpectation,
+    #[serde(default)]
+    round: Option<WorkflowRoundInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowRoundInput {
+    expected_revision: u64,
+    action: WorkflowActionInput,
+    #[serde(default)]
+    state_patch: Option<Value>,
+    #[serde(default)]
+    summary_patch: Option<SummaryPatchInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowActionInput {
+    name: String,
+    status: String,
+    #[serde(default)]
+    result: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SummaryPatchInput {
+    text: String,
+    #[serde(default)]
+    source_revision: Option<String>,
 }
 
 /// Наблюдение из актуального источника, добавляемое в evidence.
@@ -173,11 +203,16 @@ fn patch_schema() -> Value {
             "blockers": nullable_list_schema("Blockers, or null to clear them."),
             "next_action": nullable_text_schema("Next action, or null to clear it."),
             "source_revision": nullable_text_schema("Source revision, or null to clear it."),
+            "context_summary": nullable_text_schema("Bounded workflow summary, or null to clear it."),
+            "summary_source_revision": nullable_text_schema("Revision that produced the summary, or null to clear it."),
             "last_observation": nullable_text_schema("Last observation value, or null to clear it."),
             "observation_source": nullable_text_schema("Observation source, or null to clear it."),
             "last_observation_revision": nullable_text_schema("Revision attached to the last observation, or null to clear it."),
             "observation_status": nullable_text_schema("Observation status: current, stale, or contradicted."),
             "observed_at": nullable_text_schema("Observation timestamp, or null to clear it."),
+            "last_action": nullable_text_schema("Last declared workflow action, or null to clear it."),
+            "last_action_status": nullable_text_schema("Last action status: planned, completed, or failed."),
+            "last_action_result": nullable_text_schema("Bounded last action result, or null to clear it."),
             "evidence_refs": nullable_list_schema("Bounded evidence references, or null to clear them."),
             "owner": nullable_text_schema("State owner, or null to clear it."),
             "lease": nullable_text_schema("Lease identifier, or null to clear it."),
@@ -191,6 +226,21 @@ fn output(title: &str, metadata: Value) -> ToolOutput {
     ToolOutput::new(body)
         .with_title(title.to_string())
         .with_metadata(metadata)
+}
+
+fn round_refusal(state: &WorkflowRunState, reason: impl Into<String>) -> ToolOutput {
+    output(
+        "workflow_state",
+        json!({
+            "action": "commit_round",
+            "applied": false,
+            "mutated": false,
+            "refused": true,
+            "reason": reason.into(),
+            "safe_fallback": "transcript",
+            "revision": state.revision,
+        }),
+    )
 }
 
 #[async_trait]
@@ -216,7 +266,8 @@ impl Tool for WorkflowStateTool {
                         "propose_patch",
                         "record_observation",
                         "retrieve_evidence",
-                        "reconcile"
+                        "reconcile",
+                        "commit_round"
                     ],
                     "description": "Read state, patch it, record an observation, list evidence or reconcile expectations.",
                 },
@@ -247,6 +298,34 @@ impl Tool for WorkflowStateTool {
                     },
                     "additionalProperties": false,
                 },
+                "round": {
+                    "type": "object",
+                    "required": ["expected_revision", "action"],
+                    "properties": {
+                        "expected_revision": {"type": "integer", "minimum": 0},
+                        "action": {
+                            "type": "object",
+                            "required": ["name", "status"],
+                            "properties": {
+                                "name": {"type": "string", "description": "Declared workflow action name. The state tool records metadata but does not execute arbitrary actions."},
+                                "status": {"type": "string", "enum": ["planned", "completed", "failed"]},
+                                "result": nullable_text_schema("Bounded action result or failure reason."),
+                            },
+                            "additionalProperties": false,
+                        },
+                        "state_patch": patch_schema(),
+                        "summary_patch": {
+                            "type": "object",
+                            "required": ["text"],
+                            "properties": {
+                                "text": {"type": "string", "description": "Bounded summary produced in the same provider round."},
+                                "source_revision": nullable_text_schema("Source revision covered by this summary."),
+                            },
+                            "additionalProperties": false,
+                        },
+                    },
+                    "additionalProperties": false,
+                },
             },
             "additionalProperties": false,
         })
@@ -270,6 +349,176 @@ impl Tool for WorkflowStateTool {
                     "fingerprint": state.fingerprint(),
                     "contract": state.contract(),
                     "state": state,
+                })
+            }
+            "commit_round" => {
+                let Some(round) = params.round else {
+                    return Ok(round_refusal(
+                        controller.workflow_run_state(),
+                        "round is required for commit_round",
+                    ));
+                };
+                let current = controller.workflow_run_state().clone();
+                if round.expected_revision != current.revision.0 {
+                    return Ok(round_refusal(
+                        &current,
+                        format!(
+                            "round revision {} does not match current revision {}",
+                            round.expected_revision, current.revision.0
+                        ),
+                    ));
+                }
+
+                let mut patch = match round.state_patch {
+                    Some(value) => match serde_json::from_value::<WorkflowStatePatch>(value) {
+                        Ok(patch) => patch,
+                        Err(error) => {
+                            return Ok(round_refusal(
+                                &current,
+                                format!("state patch is invalid: {error}"),
+                            ));
+                        }
+                    },
+                    None => WorkflowStatePatch::new(current.state_schema.clone(), current.revision),
+                };
+                if patch.expected_revision != current.revision
+                    || patch.state_schema != current.state_schema
+                {
+                    return Ok(round_refusal(
+                        &current,
+                        "state patch schema or expected revision does not match the round",
+                    ));
+                }
+                if patch.context_summary.is_some()
+                    || patch.summary_source_revision.is_some()
+                    || patch.last_action.is_some()
+                    || patch.last_action_status.is_some()
+                    || patch.last_action_result.is_some()
+                {
+                    return Ok(round_refusal(
+                        &current,
+                        "state patch cannot directly set summary or action fields in commit_round",
+                    ));
+                }
+
+                let action_name = round.action.name.trim();
+                if action_name.is_empty() {
+                    return Ok(round_refusal(
+                        &current,
+                        "workflow action name must not be empty",
+                    ));
+                }
+                if action_name.chars().count() > MAX_WORKFLOW_ACTION_CHARS {
+                    return Ok(round_refusal(
+                        &current,
+                        format!(
+                            "workflow action name exceeds {MAX_WORKFLOW_ACTION_CHARS} characters"
+                        ),
+                    ));
+                }
+                let action_status = round.action.status.trim();
+                if !matches!(
+                    action_status,
+                    ACTION_STATUS_PLANNED | ACTION_STATUS_COMPLETED | ACTION_STATUS_FAILED
+                ) {
+                    return Ok(round_refusal(
+                        &current,
+                        format!("workflow action has invalid status {action_status:?}"),
+                    ));
+                }
+                let action_result = round
+                    .action
+                    .result
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|result| !result.is_empty());
+                if action_result
+                    .is_some_and(|result| result.chars().count() > MAX_WORKFLOW_ACTION_RESULT_CHARS)
+                {
+                    return Ok(round_refusal(
+                        &current,
+                        format!(
+                            "workflow action result exceeds {MAX_WORKFLOW_ACTION_RESULT_CHARS} characters"
+                        ),
+                    ));
+                }
+
+                let summary_applied = round.summary_patch.is_some();
+                if let Some(summary) = round.summary_patch {
+                    let summary_text = summary.text.trim();
+                    if summary_text.is_empty() {
+                        return Ok(round_refusal(&current, "summary text must not be empty"));
+                    }
+                    if summary_text.chars().count() > MAX_WORKFLOW_SUMMARY_CHARS {
+                        return Ok(round_refusal(
+                            &current,
+                            format!("summary text exceeds {MAX_WORKFLOW_SUMMARY_CHARS} characters"),
+                        ));
+                    }
+                    let summary_revision = summary
+                        .source_revision
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|revision| !revision.is_empty())
+                        .map(ToOwned::to_owned);
+                    let source_revision_after_patch = match &patch.source_revision {
+                        Some(PatchValue::Set(revision)) => Some(revision.clone()),
+                        Some(PatchValue::Clear) => None,
+                        None => current.source_revision.clone(),
+                    };
+                    if summary_revision.is_none() && source_revision_after_patch.is_some() {
+                        return Ok(round_refusal(
+                            &current,
+                            "summary source_revision is required while workflow source_revision is set",
+                        ));
+                    }
+                    patch.context_summary = Some(PatchValue::Set(summary_text.to_string()));
+                    patch.summary_source_revision = Some(match summary_revision {
+                        Some(revision) => PatchValue::Set(revision),
+                        None => PatchValue::Clear,
+                    });
+                }
+                patch.last_action = Some(PatchValue::Set(action_name.to_string()));
+                patch.last_action_status = Some(PatchValue::Set(action_status.to_string()));
+                patch.last_action_result = Some(match action_result {
+                    Some(result) => PatchValue::Set(result.to_string()),
+                    None => PatchValue::Clear,
+                });
+
+                let next = match controller.preview_execution_state_patch(&patch) {
+                    Ok(next) => next,
+                    Err(error) => {
+                        return Ok(round_refusal(
+                            &current,
+                            format!("validated round patch was refused: {error}"),
+                        ));
+                    }
+                };
+                let revision = match controller.apply_workflow_state_patch(&patch) {
+                    Ok(revision) => revision,
+                    Err(error) => {
+                        return Ok(round_refusal(
+                            &current,
+                            format!("round apply failed without state replacement: {error}"),
+                        ));
+                    }
+                };
+                debug_assert_eq!(revision, next.revision);
+                json!({
+                    "action": "commit_round",
+                    "plane": ContextPlane::Execution,
+                    "applied": true,
+                    "mutated": true,
+                    "previous_revision": current.revision,
+                    "revision": revision,
+                    "revision_increment": 1,
+                    "workflow_action": {
+                        "name": action_name,
+                        "status": action_status,
+                        "result": action_result,
+                    },
+                    "summary_applied": summary_applied,
+                    "state": controller.workflow_run_state(),
                 })
             }
             "propose_patch" => {
@@ -398,6 +647,8 @@ impl Tool for WorkflowStateTool {
                     });
                     patch.observation_status =
                         Some(PatchValue::Set(OBSERVATION_STATUS_CURRENT.to_string()));
+                    patch.context_summary = Some(PatchValue::Clear);
+                    patch.summary_source_revision = Some(PatchValue::Clear);
                     patch.observed_at = Some(match observed_at {
                         Some(value) => PatchValue::Set(value.to_string()),
                         None => PatchValue::Clear,
@@ -428,11 +679,16 @@ impl Tool for WorkflowStateTool {
                     "mutated": false,
                     "revision": state.revision,
                     "source_revision": state.source_revision,
+                    "context_summary": state.context_summary,
+                    "summary_source_revision": state.summary_source_revision,
                     "last_observation": state.last_observation,
                     "observation_source": state.observation_source,
                     "last_observation_revision": state.last_observation_revision,
                     "observation_status": state.observation_status,
                     "observed_at": state.observed_at,
+                    "last_action": state.last_action,
+                    "last_action_status": state.last_action_status,
+                    "last_action_result": state.last_action_result,
                     "owner": state.owner,
                     "lease": state.lease,
                     "evidence_refs": evidence,
@@ -549,7 +805,8 @@ mod tests {
                 "propose_patch",
                 "record_observation",
                 "retrieve_evidence",
-                "reconcile"
+                "reconcile",
+                "commit_round"
             ])
         );
         assert_eq!(
@@ -639,6 +896,209 @@ mod tests {
                 .revision,
             WorkflowRunRevision::new(1)
         );
+    }
+
+    #[tokio::test]
+    async fn commit_round_applies_action_state_and_summary_once() {
+        let (tool, controller, ctx) = bound_tool("round-commit");
+        let mut state_patch = WorkflowStatePatch::new("default", WorkflowRunRevision::INITIAL);
+        state_patch.phase = Some(PatchValue::Set("build".to_string()));
+        state_patch.source_revision = Some(PatchValue::Set("source:v1".to_string()));
+
+        let result = tool
+            .execute(
+                json!({
+                    "action": "commit_round",
+                    "round": {
+                        "expected_revision": 0,
+                        "action": {
+                            "name": "run-checks",
+                            "status": "completed",
+                            "result": "checks passed"
+                        },
+                        "state_patch": serde_json::to_value(state_patch).expect("state patch"),
+                        "summary_patch": {
+                            "text": "Build phase completed.",
+                            "source_revision": "source:v1"
+                        }
+                    }
+                }),
+                ctx,
+            )
+            .await
+            .expect("round should apply");
+        let metadata = result.metadata.expect("round metadata");
+
+        assert_eq!(metadata["applied"], json!(true));
+        assert_eq!(metadata["revision_increment"], json!(1));
+        assert_eq!(metadata["previous_revision"], json!(0));
+        assert_eq!(metadata["revision"], json!(1));
+        assert_eq!(metadata["summary_applied"], json!(true));
+        assert_eq!(metadata["workflow_action"]["status"], json!("completed"));
+
+        let state = controller.lock().expect("controller lock");
+        let workflow = state.workflow_run_state();
+        assert_eq!(workflow.phase.as_deref(), Some("build"));
+        assert_eq!(
+            workflow.context_summary.as_deref(),
+            Some("Build phase completed.")
+        );
+        assert_eq!(
+            workflow.summary_source_revision.as_deref(),
+            Some("source:v1")
+        );
+        assert_eq!(workflow.last_action.as_deref(), Some("run-checks"));
+        assert_eq!(workflow.last_action_status.as_deref(), Some("completed"));
+        assert_eq!(
+            workflow.last_action_result.as_deref(),
+            Some("checks passed")
+        );
+        assert!(workflow.prompt_summary().contains("Build phase completed."));
+        assert_eq!(workflow.revision, WorkflowRunRevision::new(1));
+    }
+
+    #[tokio::test]
+    async fn commit_round_refuses_stale_or_owned_patch_without_mutation() {
+        let (tool, controller, ctx) = bound_tool("round-refusal");
+        let mut initial_patch = WorkflowStatePatch::new("default", WorkflowRunRevision::INITIAL);
+        initial_patch.goal = Some(PatchValue::Set("initial goal".to_string()));
+        initial_patch.source_revision = Some(PatchValue::Set("source:v1".to_string()));
+        tool.execute(
+            json!({
+                "action": "commit_round",
+                "round": {
+                    "expected_revision": 0,
+                    "action": {"name": "initialize", "status": "completed"},
+                    "state_patch": serde_json::to_value(initial_patch).expect("state patch")
+                }
+            }),
+            ctx.clone(),
+        )
+        .await
+        .expect("initial round should apply");
+
+        let before = controller
+            .lock()
+            .expect("controller lock")
+            .workflow_run_state()
+            .clone();
+        let mut stale_patch = WorkflowStatePatch::new("default", WorkflowRunRevision::INITIAL);
+        stale_patch.phase = Some(PatchValue::Set("stale phase".to_string()));
+        let stale = tool
+            .execute(
+                json!({
+                    "action": "commit_round",
+                    "round": {
+                        "expected_revision": 0,
+                        "action": {"name": "stale", "status": "completed"},
+                        "state_patch": serde_json::to_value(stale_patch).expect("state patch")
+                    }
+                }),
+                ctx.clone(),
+            )
+            .await
+            .expect("stale round should return refusal metadata");
+        let stale_metadata = stale.metadata.expect("stale refusal metadata");
+        assert_eq!(stale_metadata["refused"], json!(true));
+        assert_eq!(stale_metadata["mutated"], json!(false));
+        assert_eq!(
+            controller
+                .lock()
+                .expect("controller lock")
+                .workflow_run_state(),
+            &before
+        );
+
+        let no_revision_summary = tool
+            .execute(
+                json!({
+                    "action": "commit_round",
+                    "round": {
+                        "expected_revision": 1,
+                        "action": {"name": "unversioned-summary", "status": "completed"},
+                        "summary_patch": {"text": "This summary lacks source provenance."}
+                    }
+                }),
+                ctx.clone(),
+            )
+            .await
+            .expect("unversioned summary should return refusal metadata");
+        let no_revision_metadata = no_revision_summary
+            .metadata
+            .expect("summary refusal metadata");
+        assert_eq!(no_revision_metadata["refused"], json!(true));
+        assert_eq!(no_revision_metadata["mutated"], json!(false));
+
+        let mut owned_patch = WorkflowStatePatch::new("default", before.revision);
+        owned_patch.context_summary = Some(PatchValue::Set("not allowed here".to_string()));
+        let owned = tool
+            .execute(
+                json!({
+                    "action": "commit_round",
+                    "round": {
+                        "expected_revision": 1,
+                        "action": {"name": "owned", "status": "completed"},
+                        "state_patch": serde_json::to_value(owned_patch).expect("state patch")
+                    }
+                }),
+                ctx,
+            )
+            .await
+            .expect("owned-field round should return refusal metadata");
+        let owned_metadata = owned.metadata.expect("owned refusal metadata");
+        assert_eq!(owned_metadata["refused"], json!(true));
+        assert_eq!(owned_metadata["mutated"], json!(false));
+        assert_eq!(
+            controller
+                .lock()
+                .expect("controller lock")
+                .workflow_run_state(),
+            &before
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_round_records_failed_action_with_safe_state_patch() {
+        let (tool, controller, ctx) = bound_tool("round-failed-action");
+        let mut state_patch = WorkflowStatePatch::new("default", WorkflowRunRevision::INITIAL);
+        state_patch.blockers = Some(PatchValue::Set(vec!["check failed".to_string()]));
+
+        tool.execute(
+            json!({
+                "action": "commit_round",
+                "round": {
+                    "expected_revision": 0,
+                    "action": {
+                        "name": "run-checks",
+                        "status": "failed",
+                        "result": "compiler rejected the change"
+                    },
+                    "state_patch": serde_json::to_value(state_patch).expect("state patch"),
+                    "summary_patch": {"text": "Checks failed; retain the safe fallback."}
+                }
+            }),
+            ctx,
+        )
+        .await
+        .expect("failed action round should still commit explicit safe state");
+
+        let state = controller.lock().expect("controller lock");
+        let workflow = state.workflow_run_state();
+        assert_eq!(workflow.last_action_status.as_deref(), Some("failed"));
+        assert_eq!(
+            workflow.last_action_result.as_deref(),
+            Some("compiler rejected the change")
+        );
+        assert_eq!(
+            workflow.blockers.as_deref(),
+            Some(["check failed".to_string()].as_slice())
+        );
+        assert!(
+            workflow
+                .prompt_summary()
+                .contains("Checks failed; retain the safe fallback.")
+        );
+        assert_eq!(workflow.revision, WorkflowRunRevision::new(1));
     }
 
     #[tokio::test]
