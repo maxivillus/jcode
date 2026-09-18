@@ -218,7 +218,7 @@ pub struct Agent {
     /// AGENTS, skills and tools hashes seen at the last preflight.
     last_provider_components_fingerprint: Option<String>,
     /// Стабильное автоматическое представление старой истории для провайдера.
-    provider_context_view: provider_context_view::ProviderContextViewState,
+    provider_context_view: provider_context_view::WorkflowContextProjector,
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
     /// Момент последней мутации транскрипта (rewind, prune, compact).
@@ -263,21 +263,31 @@ impl Agent {
         }
     }
 
-    /// Enables the state-first provider view only for an active skill and only
+    /// Enables the state-first provider view only for an active workflow and only
     /// when explicitly requested. The default remains the transcript view so a
     /// failed or uninitialized state never changes the existing path silently.
-    fn should_use_state_first_view(&self) -> bool {
-        if self.active_skill.is_none() {
+    fn has_active_workflow(&self) -> bool {
+        // `active_skill` is retained at the protocol and registry boundary for
+        // compatibility. The state-first architecture treats it as a workflow
+        // activation signal rather than as the state owner.
+        self.active_skill.is_some()
+    }
+
+    fn should_use_workflow_context_view(&self) -> bool {
+        if !self.has_active_workflow() {
             return false;
         }
-        let requested = match std::env::var("JCODE_STATE_FIRST") {
-            Ok(value) => {
-                let value = value.trim();
-                value == "1"
-                    || value.eq_ignore_ascii_case("true")
-                    || value.eq_ignore_ascii_case("on")
-            }
-            Err(_) => false,
+        let requested = match std::env::var("JCODE_CONTEXT_MODE") {
+            Ok(value) => value.trim().eq_ignore_ascii_case("state_first"),
+            Err(_) => match std::env::var("JCODE_STATE_FIRST") {
+                Ok(value) => {
+                    let value = value.trim();
+                    value == "1"
+                        || value.eq_ignore_ascii_case("true")
+                        || value.eq_ignore_ascii_case("on")
+                }
+                Err(_) => false,
+            },
         };
         if !requested {
             return false;
@@ -287,11 +297,11 @@ impl Agent {
             .context_controller
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .execution_state()
+            .workflow_run_state()
             .validate()
             .is_ok();
         if !state_valid {
-            logging::warn("State-first provider view disabled: execution state is invalid");
+            logging::warn("Workflow context view disabled: workflow run state is invalid");
         }
         state_valid
     }
@@ -342,7 +352,7 @@ impl Agent {
             agents_md_snapshot,
             last_provider_static_prompt_hash: None,
             last_provider_components_fingerprint: None,
-            provider_context_view: provider_context_view::ProviderContextViewState::default(),
+            provider_context_view: provider_context_view::WorkflowContextProjector::default(),
             memory_enabled: crate::config::config().features.memory,
             last_transcript_mutation_at: None,
             stdin_request_tx: None,
@@ -840,9 +850,10 @@ impl Agent {
         tools: &[ToolDefinition],
     ) -> Vec<Message> {
         let tool_definition_tokens = ToolDefinition::aggregate_prompt_token_estimate(tools);
-        let state_first = self.should_use_state_first_view();
-        let result = if state_first {
-            self.provider_context_view.project_state_first(messages)
+        let workflow_context_mode = self.should_use_workflow_context_view();
+        let result = if workflow_context_mode {
+            self.provider_context_view
+                .project_workflow_context(messages)
         } else {
             self.provider_context_view.project(
                 messages,

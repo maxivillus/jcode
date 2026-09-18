@@ -7,6 +7,7 @@
 use crate::context::{ContextBudget, ContextComponentHashes, ContextManifest, ContextRevision};
 use crate::execution_state::{
     ExecutionState, ExecutionStateError, ExecutionStatePatch, ExecutionStateRevision,
+    WorkflowRunState, WorkflowStateError, WorkflowStatePatch,
 };
 use serde::{Deserialize, Serialize};
 
@@ -482,6 +483,11 @@ impl ContextController {
         &self.execution_state
     }
 
+    /// Canonical workflow vocabulary for the state of the current run.
+    pub fn workflow_run_state(&self) -> &WorkflowRunState {
+        self.execution_state()
+    }
+
     /// Возвращает budget последнего provider preflight, если он уже выполнялся.
     pub fn last_budget(&self) -> Option<&ContextBudget> {
         self.last_budget.as_ref()
@@ -646,6 +652,14 @@ impl ContextController {
     ) -> Result<ExecutionStateRevision, ExecutionStateError> {
         self.execution_state.apply_patch(patch)?;
         Ok(self.execution_state.revision)
+    }
+
+    /// Applies a revision-checked patch using the workflow vocabulary.
+    pub fn apply_workflow_state_patch(
+        &mut self,
+        patch: &WorkflowStatePatch,
+    ) -> Result<ExecutionStateRevision, WorkflowStateError> {
+        self.apply_execution_state_patch(patch)
     }
 
     /// Обновляет hashes и provider generation до отправки запроса.

@@ -81,7 +81,7 @@ async fn registry_registers_context_tools_and_schemas() {
             ]),
         ),
         (
-            "skill_state",
+            "workflow_state",
             json!([
                 "get_state",
                 "propose_patch",
@@ -98,7 +98,7 @@ async fn registry_registers_context_tools_and_schemas() {
             .input_schema;
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["properties"]["action"]["enum"], actions);
-        if name == "skill_state" {
+        if name == "workflow_state" {
             assert_eq!(
                 schema["properties"]["patch"]["properties"]["expected_revision"]["type"],
                 "integer"

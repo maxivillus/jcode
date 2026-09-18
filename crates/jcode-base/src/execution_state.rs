@@ -17,7 +17,7 @@ pub const MAX_EXECUTION_STATE_LIST_ITEMS: usize = 128;
 /// Верхняя граница текста state, который можно добавить в prompt модели.
 ///
 /// Проекция намеренно меньше полного machine-readable state: она сохраняет
-/// рабочие поля skill-run, но не переносит в prompt owner, lease и raw evidence
+/// рабочие поля workflow run, но не переносит в prompt owner, lease и raw evidence
 /// references. Лимит держит dynamic-часть предсказуемой и не затрагивает
 /// cacheable static prefix.
 pub const MAX_EXECUTION_STATE_PROMPT_CHARS: usize = 2048;
@@ -71,13 +71,17 @@ const EXECUTION_STATE_FIELDS: [&str; 17] = [
     "lease",
 ];
 
-/// Revision структурированного состояния skill-run.
+/// Revision структурированного состояния workflow run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ExecutionStateRevision(pub u64);
 
 impl ExecutionStateRevision {
     pub const INITIAL: Self = Self(0);
+
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
 
     fn next(self) -> Option<Self> {
         self.0.checked_add(1).map(Self)
@@ -267,7 +271,7 @@ impl ExecutionStateContract {
     }
 }
 
-/// Ограниченное состояние текущего procedural skill-run.
+/// Ограниченное состояние текущего procedural workflow run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionState {
     #[serde(default = "default_state_schema_version")]
@@ -504,14 +508,14 @@ impl ExecutionState {
         crate::context::sha256_hex(encoded)
     }
 
-    /// Строит bounded human-readable projection для активного skill prompt.
+    /// Строит bounded human-readable projection для активного workflow prompt.
     ///
-    /// Это не замена полному state или `skill_state`: machine-readable contract
+    /// Это не замена полному state или `workflow_state`: machine-readable contract
     /// остаётся доступен через tool. В prompt попадают только operational fields,
     /// которые нужны для продолжения процедуры. `owner`, `lease` и значения
     /// `evidence_refs` не копируются в provider-facing текст.
     pub fn prompt_summary(&self) -> String {
-        let mut summary = String::from("# Execution State\n");
+        let mut summary = String::from("# Workflow Run State\n");
         append_prompt_line(
             &mut summary,
             "schema_version",
@@ -1180,6 +1184,17 @@ fn apply_list_patch(target: &mut Option<Vec<String>>, patch: &OptionalPatch<Vec<
         Some(PatchValue::Set(value)) => *target = Some(value.clone()),
     }
 }
+
+/// Canonical workflow vocabulary for the bounded state carried by one run.
+///
+/// The `ExecutionState*` names remain available as compatibility aliases for
+/// downstream users and older serialized integrations.
+pub type WorkflowRunState = ExecutionState;
+pub type WorkflowRunRevision = ExecutionStateRevision;
+pub type WorkflowRunFieldLimit = ExecutionStateFieldLimit;
+pub type WorkflowStateContract = ExecutionStateContract;
+pub type WorkflowStatePatch = ExecutionStatePatch;
+pub type WorkflowStateError = ExecutionStateError;
 
 #[cfg(test)]
 #[path = "execution_state_tests.rs"]

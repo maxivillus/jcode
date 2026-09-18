@@ -3,25 +3,25 @@ use super::{
     context_control::{ContextControllerBindings, context_controller_for_session},
 };
 use crate::context::ContextPlane;
-use crate::execution_state::{ExecutionStatePatch, PatchValue};
+use crate::execution_state::{PatchValue, WorkflowStatePatch};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-/// Model surface for bounded, revision-checked execution state.
-pub(crate) struct SkillStateTool {
+/// Model surface for bounded, revision-checked workflow run state.
+pub(crate) struct WorkflowStateTool {
     bindings: ContextControllerBindings,
 }
 
-impl SkillStateTool {
+impl WorkflowStateTool {
     pub(crate) fn new(bindings: ContextControllerBindings) -> Self {
         Self { bindings }
     }
 }
 
 #[derive(Debug, Deserialize)]
-struct SkillStateInput {
+struct WorkflowStateInput {
     #[serde(default = "default_action")]
     action: String,
     #[serde(default)]
@@ -109,13 +109,13 @@ fn output(title: &str, metadata: Value) -> ToolOutput {
 }
 
 #[async_trait]
-impl Tool for SkillStateTool {
+impl Tool for WorkflowStateTool {
     fn name(&self) -> &str {
-        "skill_state"
+        "workflow_state"
     }
 
     fn description(&self) -> &str {
-        "Read, patch, observe and reconcile bounded execution state."
+        "Read, patch, observe and reconcile bounded workflow run state."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -166,7 +166,7 @@ impl Tool for SkillStateTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let params: SkillStateInput = serde_json::from_value(input)?;
+        let params: WorkflowStateInput = serde_json::from_value(input)?;
         let controller = context_controller_for_session(&self.bindings, &ctx.session_id)?;
         let mut controller = controller
             .lock()
@@ -174,7 +174,7 @@ impl Tool for SkillStateTool {
 
         let metadata = match params.action.as_str() {
             "get_state" => {
-                let state = controller.execution_state().clone();
+                let state = controller.workflow_run_state().clone();
                 json!({
                     "action": "get_state",
                     "plane": ContextPlane::Execution,
@@ -189,10 +189,10 @@ impl Tool for SkillStateTool {
                 let patch = params
                     .patch
                     .ok_or_else(|| anyhow::anyhow!("patch is required for propose_patch"))?;
-                let patch: ExecutionStatePatch = serde_json::from_value(patch)?;
-                let previous_revision = controller.execution_state().revision;
-                let revision = controller.apply_execution_state_patch(&patch)?;
-                let state = controller.execution_state().clone();
+                let patch: WorkflowStatePatch = serde_json::from_value(patch)?;
+                let previous_revision = controller.workflow_run_state().revision;
+                let revision = controller.apply_workflow_state_patch(&patch)?;
+                let state = controller.workflow_run_state().clone();
                 json!({
                     "action": "propose_patch",
                     "plane": ContextPlane::Execution,
@@ -226,7 +226,7 @@ impl Tool for SkillStateTool {
                     None => text.to_string(),
                 };
                 let (schema, revision, mut evidence) = {
-                    let state = controller.execution_state();
+                    let state = controller.workflow_run_state();
                     let evidence: Vec<String> =
                         state.evidence_refs.iter().flatten().cloned().collect();
                     (state.state_schema.clone(), state.revision, evidence)
@@ -237,10 +237,10 @@ impl Tool for SkillStateTool {
                     );
                 }
                 evidence.push(entry);
-                let mut patch = ExecutionStatePatch::new(schema, revision);
+                let mut patch = WorkflowStatePatch::new(schema, revision);
                 patch.evidence_refs = Some(PatchValue::Set(evidence));
-                let revision = controller.apply_execution_state_patch(&patch)?;
-                let state = controller.execution_state();
+                let revision = controller.apply_workflow_state_patch(&patch)?;
+                let state = controller.workflow_run_state();
                 json!({
                     "action": "record_observation",
                     "plane": ContextPlane::Evidence,
@@ -251,7 +251,7 @@ impl Tool for SkillStateTool {
                 })
             }
             "retrieve_evidence" => {
-                let state = controller.execution_state();
+                let state = controller.workflow_run_state();
                 let evidence: Vec<String> = state.evidence_refs.iter().flatten().cloned().collect();
                 json!({
                     "action": "retrieve_evidence",
@@ -266,7 +266,7 @@ impl Tool for SkillStateTool {
             }
             "reconcile" => {
                 let expected = params.expected;
-                let state = controller.execution_state();
+                let state = controller.workflow_run_state();
                 let mut differences: Vec<String> = Vec::new();
                 if let Some(phase) = expected.phase.as_deref()
                     && state.phase.as_deref() != Some(phase)
@@ -301,17 +301,17 @@ impl Tool for SkillStateTool {
                     "differences": differences,
                 })
             }
-            action => anyhow::bail!("unsupported skill_state action: {action}"),
+            action => anyhow::bail!("unsupported workflow_state action: {action}"),
         };
 
-        Ok(output("skill_state", metadata))
+        Ok(output("workflow_state", metadata))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::execution_state::{ExecutionStatePatch, ExecutionStateRevision, PatchValue};
+    use crate::execution_state::{PatchValue, WorkflowRunRevision, WorkflowStatePatch};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, RwLock};
 
@@ -330,7 +330,7 @@ mod tests {
     fn bound_tool(
         session_id: &str,
     ) -> (
-        SkillStateTool,
+        WorkflowStateTool,
         Arc<Mutex<crate::context_controller::ContextController>>,
         ToolContext,
     ) {
@@ -343,7 +343,7 @@ mod tests {
             .expect("bindings lock")
             .insert(session_id.to_string(), Arc::downgrade(&controller));
         (
-            SkillStateTool::new(bindings),
+            WorkflowStateTool::new(bindings),
             controller,
             tool_context(session_id),
         )
@@ -353,11 +353,11 @@ mod tests {
         let (schema, revision) = {
             let controller = controller.lock().expect("controller lock");
             (
-                controller.execution_state().state_schema.clone(),
-                controller.execution_state().revision,
+                controller.workflow_run_state().state_schema.clone(),
+                controller.workflow_run_state().revision,
             )
         };
-        let mut patch = ExecutionStatePatch::new(schema, revision);
+        let mut patch = WorkflowStatePatch::new(schema, revision);
         patch.goal = Some(PatchValue::Set("bounded goal".to_string()));
         serde_json::to_value(patch).expect("patch serialization")
     }
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn schema_describes_revision_checked_patch_and_null_clear() {
         let bindings: ContextControllerBindings = Arc::new(RwLock::new(HashMap::new()));
-        let schema = SkillStateTool::new(bindings).parameters_schema();
+        let schema = WorkflowStateTool::new(bindings).parameters_schema();
 
         assert_eq!(schema["additionalProperties"], json!(false));
         assert_eq!(
@@ -398,7 +398,7 @@ mod tests {
         let before = controller
             .lock()
             .expect("controller lock")
-            .execution_state()
+            .workflow_run_state()
             .clone();
 
         let result = tool
@@ -431,7 +431,7 @@ mod tests {
             controller
                 .lock()
                 .expect("controller lock")
-                .execution_state(),
+                .workflow_run_state(),
             &before
         );
     }
@@ -461,9 +461,9 @@ mod tests {
             controller
                 .lock()
                 .expect("controller lock")
-                .execution_state()
+                .workflow_run_state()
                 .revision,
-            ExecutionStateRevision(1)
+            WorkflowRunRevision::new(1)
         );
     }
 
@@ -479,7 +479,7 @@ mod tests {
         let before = controller
             .lock()
             .expect("controller lock")
-            .execution_state()
+            .workflow_run_state()
             .clone();
 
         let error = tool
@@ -492,7 +492,7 @@ mod tests {
             controller
                 .lock()
                 .expect("controller lock")
-                .execution_state(),
+                .workflow_run_state(),
             &before
         );
     }
@@ -513,7 +513,7 @@ mod tests {
             bindings_guard.insert(session_a.to_string(), Arc::downgrade(&controller_a));
             bindings_guard.insert(session_b.to_string(), Arc::downgrade(&controller_b));
         }
-        let tool = SkillStateTool::new(bindings);
+        let tool = WorkflowStateTool::new(bindings);
 
         tool.execute(
             json!({
@@ -537,15 +537,15 @@ mod tests {
             controller_b
                 .lock()
                 .expect("controller lock")
-                .execution_state()
+                .workflow_run_state()
                 .revision,
-            ExecutionStateRevision::INITIAL
+            WorkflowRunRevision::INITIAL
         );
     }
 
     #[tokio::test]
     async fn record_observation_appends_evidence_and_advances_revision() {
-        let (tool, controller, ctx) = bound_tool("skill-observe");
+        let (tool, controller, ctx) = bound_tool("workflow-observe");
 
         let result = tool
             .execute(
@@ -565,7 +565,7 @@ mod tests {
         assert_eq!(metadata["evidence_count"], json!(1));
         let controller = controller.lock().expect("controller lock");
         let evidence = controller
-            .execution_state()
+            .workflow_run_state()
             .evidence_refs
             .clone()
             .unwrap_or_default();
@@ -574,7 +574,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_observation_rejects_empty_and_oversized_text() {
-        let (tool, _controller, ctx) = bound_tool("skill-observe-invalid");
+        let (tool, _controller, ctx) = bound_tool("workflow-observe-invalid");
 
         let error = tool
             .execute(
@@ -603,21 +603,21 @@ mod tests {
 
     #[tokio::test]
     async fn retrieve_evidence_is_read_only() {
-        let (tool, controller, ctx) = bound_tool("skill-evidence");
+        let (tool, controller, ctx) = bound_tool("workflow-evidence");
         {
             let mut controller = controller.lock().expect("controller lock");
-            let state = controller.execution_state();
-            let mut patch = ExecutionStatePatch::new(state.state_schema.clone(), state.revision);
+            let state = controller.workflow_run_state();
+            let mut patch = WorkflowStatePatch::new(state.state_schema.clone(), state.revision);
             patch.evidence_refs = Some(PatchValue::Set(vec!["file:line".to_string()]));
             patch.source_revision = Some(PatchValue::Set("abc123".to_string()));
             controller
-                .apply_execution_state_patch(&patch)
+                .apply_workflow_state_patch(&patch)
                 .expect("patch should apply");
         }
         let before = controller
             .lock()
             .expect("controller lock")
-            .execution_state()
+            .workflow_run_state()
             .clone();
 
         let result = tool
@@ -634,27 +634,27 @@ mod tests {
             controller
                 .lock()
                 .expect("controller lock")
-                .execution_state(),
+                .workflow_run_state(),
             &before
         );
     }
 
     #[tokio::test]
     async fn reconcile_reports_differences_without_mutation() {
-        let (tool, controller, ctx) = bound_tool("skill-reconcile");
+        let (tool, controller, ctx) = bound_tool("workflow-reconcile");
         {
             let mut controller = controller.lock().expect("controller lock");
-            let state = controller.execution_state();
-            let mut patch = ExecutionStatePatch::new(state.state_schema.clone(), state.revision);
+            let state = controller.workflow_run_state();
+            let mut patch = WorkflowStatePatch::new(state.state_schema.clone(), state.revision);
             patch.phase = Some(PatchValue::Set("build".to_string()));
             controller
-                .apply_execution_state_patch(&patch)
+                .apply_workflow_state_patch(&patch)
                 .expect("patch should apply");
         }
         let before = controller
             .lock()
             .expect("controller lock")
-            .execution_state()
+            .workflow_run_state()
             .clone();
 
         let result = tool
@@ -690,7 +690,7 @@ mod tests {
             controller
                 .lock()
                 .expect("controller lock")
-                .execution_state(),
+                .workflow_run_state(),
             &before
         );
     }

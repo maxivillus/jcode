@@ -40,13 +40,13 @@ struct ViewFingerprint {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct ProviderContextViewState {
+pub struct WorkflowContextProjector {
     stable_boundary: Option<Boundary>,
     last_view: Option<ViewFingerprint>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ProviderContextViewResult {
+pub struct WorkflowContextView {
     pub messages: Vec<Message>,
     pub mode: &'static str,
     pub representation_changed: bool,
@@ -64,7 +64,7 @@ pub struct ProviderContextViewResult {
     pub reason: String,
 }
 
-impl ProviderContextViewState {
+impl WorkflowContextProjector {
     pub fn reset(&mut self) {
         self.stable_boundary = None;
         self.last_view = None;
@@ -76,7 +76,7 @@ impl ProviderContextViewState {
         provider_context_limit: usize,
         system_prompt_tokens: usize,
         tool_definition_tokens: usize,
-    ) -> ProviderContextViewResult {
+    ) -> WorkflowContextView {
         let before_tokens = message_token_estimate(messages);
         let before_turn_groups = turn_group_ranges(messages).len();
         let source_prefix_hashes = rolling_prefix_hashes(messages);
@@ -176,7 +176,7 @@ impl ProviderContextViewState {
             prefix_hash: view_version,
         });
 
-        ProviderContextViewResult {
+        WorkflowContextView {
             messages: output,
             mode: "transcript",
             representation_changed,
@@ -195,13 +195,13 @@ impl ProviderContextViewState {
         }
     }
 
-    /// Projects an active procedural skill to the latest turn only.
+    /// Projects an active workflow to the latest turn only.
     ///
-    /// The immutable skill specification and bounded `ExecutionState` are
+    /// The immutable workflow specification and bounded `WorkflowRunState` are
     /// carried by the split system prompt. The message view keeps only the
     /// current request and its tool observations, while the canonical session
     /// remains unchanged for audit and recovery.
-    pub fn project_state_first(&mut self, messages: &[Message]) -> ProviderContextViewResult {
+    pub fn project_workflow_context(&mut self, messages: &[Message]) -> WorkflowContextView {
         let before_tokens = message_token_estimate(messages);
         let before_turn_groups = turn_group_ranges(messages).len();
         let source_version = rolling_prefix_hashes(messages).last().copied().unwrap_or(0);
@@ -242,7 +242,7 @@ impl ProviderContextViewState {
             prefix_hash: view_version,
         });
 
-        ProviderContextViewResult {
+        WorkflowContextView {
             messages: output,
             mode: "state_first",
             representation_changed,
@@ -260,7 +260,18 @@ impl ProviderContextViewState {
             reason,
         }
     }
+
+    /// Compatibility wrapper for callers using the earlier algorithm name.
+    #[deprecated(note = "use project_workflow_context")]
+    pub fn project_state_first(&mut self, messages: &[Message]) -> WorkflowContextView {
+        self.project_workflow_context(messages)
+    }
 }
+
+/// Compatibility name retained for transcript-oriented callers.
+pub type ProviderContextViewState = WorkflowContextProjector;
+/// Compatibility result name retained for downstream callers.
+pub type ProviderContextViewResult = WorkflowContextView;
 
 fn budget_fraction(budget: usize, numerator: usize, denominator: usize) -> usize {
     let calculated = budget.saturating_mul(numerator) / denominator;
@@ -675,7 +686,7 @@ mod tests {
         for count in [50, 100, 200] {
             let messages = groups(count);
             let before = serde_json::to_string(&messages).unwrap();
-            let mut state = ProviderContextViewState::default();
+            let mut state = WorkflowContextProjector::default();
             let result = state.project(&messages, 20_000, 0, 0);
 
             assert!(result.active);
@@ -688,7 +699,7 @@ mod tests {
     #[test]
     fn summary_contains_source_boundary_and_question_answer_pairs() {
         let messages = groups(30);
-        let mut state = ProviderContextViewState::default();
+        let mut state = WorkflowContextProjector::default();
         let result = state.project(&messages, 10_000, 0, 0);
         let summary = result
             .messages
@@ -706,7 +717,7 @@ mod tests {
     fn changed_omitted_source_drops_stale_fact_from_summary_and_view() {
         let mut messages = groups(30);
         messages[1] = assistant("stale fact: the deployment is green");
-        let mut state = ProviderContextViewState::default();
+        let mut state = WorkflowContextProjector::default();
         let old = state.project(&messages, 10_000, 0, 0);
         let old_summary = old
             .messages
@@ -757,7 +768,7 @@ mod tests {
             "Какая сейчас погода? Какая погода в Амстердаме? Какая погода будет завтра?",
         ));
         messages.push(assistant("Тепло. В Амстердаме +24. Завтра будет +26."));
-        let mut state = ProviderContextViewState::default();
+        let mut state = WorkflowContextProjector::default();
         let result = state.project(&messages, 1_000, 0, 0);
 
         assert_eq!(
@@ -776,16 +787,16 @@ mod tests {
     }
 
     #[test]
-    fn state_first_keeps_only_latest_turn_and_tool_observations() {
+    fn workflow_context_keeps_only_latest_run_observations() {
         let mut messages = groups(4);
-        messages[1] = assistant("old fact: Amsterdam is +24");
-        messages.push(user("Check the current weather again."));
+        messages[1] = assistant("old value: source:v1");
+        messages.push(user("Check the latest source record."));
         messages.push(tool_call("weather-call"));
         messages.push(tool_result("weather-call"));
-        messages.push(assistant("fresh fact: Amsterdam is +26"));
+        messages.push(assistant("updated value: source:v2"));
 
-        let mut state = ProviderContextViewState::default();
-        let result = state.project_state_first(&messages);
+        let mut state = WorkflowContextProjector::default();
+        let result = state.project_workflow_context(&messages);
 
         assert_eq!(result.mode, "state_first");
         assert!(result.active);
@@ -793,16 +804,10 @@ mod tests {
         assert!(result.excluded_messages > 0);
         assert!(text_contains(
             &result.messages,
-            "Check the current weather again."
+            "Check the latest source record."
         ));
-        assert!(text_contains(
-            &result.messages,
-            "fresh fact: Amsterdam is +26"
-        ));
-        assert!(!text_contains(
-            &result.messages,
-            "old fact: Amsterdam is +24"
-        ));
+        assert!(text_contains(&result.messages, "updated value: source:v2"));
+        assert!(!text_contains(&result.messages, "old value: source:v1"));
         assert_eq!(first_gap(&result.messages), None);
     }
 
@@ -815,7 +820,7 @@ mod tests {
             messages.push(tool_result(&format!("call-{index}")));
             messages.push(assistant("done"));
         }
-        let mut state = ProviderContextViewState::default();
+        let mut state = WorkflowContextProjector::default();
         let result = state.project(&messages, 10_000, 0, 0);
 
         assert_eq!(first_gap(&result.messages), None);
@@ -824,7 +829,7 @@ mod tests {
     #[test]
     fn stable_projection_accepts_append_only_growth_without_representation_reset() {
         let mut messages = groups(30);
-        let mut state = ProviderContextViewState::default();
+        let mut state = WorkflowContextProjector::default();
         let first = state.project(&messages, 10_000, 0, 0);
         assert!(first.active);
 

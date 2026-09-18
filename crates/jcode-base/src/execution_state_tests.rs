@@ -45,24 +45,24 @@ fn prompt_summary_clips_long_utf8_values_without_breaking_boundaries() {
 
 #[test]
 fn prompt_summary_uses_latest_source_revision_after_observation_patch() {
-    let mut state = ExecutionState::new("weather-check").unwrap();
-    let mut first_observation = ExecutionStatePatch::new("weather-check", state.revision);
-    first_observation.source_revision = Some(PatchValue::Set("weather:v1".to_string()));
+    let mut state = ExecutionState::new("sample-workflow").unwrap();
+    let mut first_observation = ExecutionStatePatch::new("sample-workflow", state.revision);
+    first_observation.source_revision = Some(PatchValue::Set("source:v1".to_string()));
     state.apply_patch(&first_observation).unwrap();
 
     assert!(
         state
             .prompt_summary()
-            .contains("source_revision: weather:v1")
+            .contains("source_revision: source:v1")
     );
 
-    let mut refreshed_observation = ExecutionStatePatch::new("weather-check", state.revision);
-    refreshed_observation.source_revision = Some(PatchValue::Set("weather:v2".to_string()));
+    let mut refreshed_observation = ExecutionStatePatch::new("sample-workflow", state.revision);
+    refreshed_observation.source_revision = Some(PatchValue::Set("source:v2".to_string()));
     state.apply_patch(&refreshed_observation).unwrap();
 
     let summary = state.prompt_summary();
-    assert!(summary.contains("source_revision: weather:v2"));
-    assert!(!summary.contains("weather:v1"));
+    assert!(summary.contains("source_revision: source:v2"));
+    assert!(!summary.contains("source:v1"));
 }
 
 #[test]

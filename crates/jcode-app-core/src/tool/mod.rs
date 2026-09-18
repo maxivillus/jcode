@@ -34,10 +34,10 @@ mod session_search;
 pub(crate) mod session_search_index;
 mod side_panel;
 mod skill;
-mod skill_state;
 mod todo;
 mod webfetch;
 mod websearch;
+mod workflow_state;
 mod write;
 
 use crate::compaction::CompactionManager;
