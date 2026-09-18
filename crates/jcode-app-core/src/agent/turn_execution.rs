@@ -267,9 +267,11 @@ impl Agent {
         });
         self.session.truncate_messages(stored_len);
         self.session.updated_at = chrono::Utc::now();
+        self.bump_provider_context_generation();
         self.provider_session_id = None;
         self.session.provider_session_id = None;
         self.cache_tracker.reset();
+        self.provider_context_view.reset();
         self.locked_tools = None;
         self.reset_tool_output_tracking();
         self.note_transcript_mutation();
@@ -288,7 +290,9 @@ impl Agent {
         self.provider_session_id = snapshot.provider_session_id;
         self.session.provider_session_id = snapshot.session_provider_session_id;
         self.session.updated_at = chrono::Utc::now();
+        self.bump_provider_context_generation();
         self.cache_tracker.reset();
+        self.provider_context_view.reset();
         self.locked_tools = None;
         self.reset_tool_output_tracking();
         self.note_transcript_mutation();

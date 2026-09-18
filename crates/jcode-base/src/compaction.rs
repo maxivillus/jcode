@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::task::JoinHandle;
 
+mod compaction_telemetry;
 pub use jcode_compaction_core::{
     CHARS_PER_TOKEN, COMPACTION_THRESHOLD, CRITICAL_THRESHOLD, CompactionAction, CompactionEvent,
     CompactionStats, DEFAULT_TOKEN_BUDGET, EMBED_MAX_CHARS_PER_MSG, EMBEDDING_HISTORY_WINDOW,
@@ -39,10 +40,8 @@ pub use jcode_compaction_core::{
     semantic_cache_key, semantic_goal_text, semantic_message_text, strip_large_images_in_contents,
     summary_payload_char_count,
 };
-
 const HARD_THRESHOLD_PENDING_WAIT_MS: u64 = 15_000;
 const HARD_THRESHOLD_PENDING_POLL_MS: u64 = 50;
-
 /// Result from background compaction task
 struct CompactionResult {
     summary_text: String,
@@ -51,7 +50,6 @@ struct CompactionResult {
     duration_ms: u64,
     summarized_messages: usize,
 }
-
 struct CompactionOutcomeLog<'a> {
     trigger: &'a str,
     pre_tokens: u64,
@@ -1230,6 +1228,7 @@ impl CompactionManager {
                         .map(|summary| summary.text.len()),
                     active_messages: Some(self.active_messages_count()),
                 });
+                compaction_telemetry::event("background", self.last_compaction.as_ref());
                 crate::logging::info(&format!(
                     "[TIMING] compaction_complete: trigger={}, duration={}ms, pre_tokens={}, post_tokens={}, tokens_saved={}, messages_compacted={}, summary_chars={}, active_messages={}",
                     self.last_compaction
@@ -1548,6 +1547,7 @@ impl CompactionManager {
                 .map(|summary| summary.text.len()),
             active_messages: Some(self.active_messages_count()),
         });
+        compaction_telemetry::event("hard", self.last_compaction.as_ref());
         self.log_compaction_outcome(CompactionOutcomeLog {
             trigger: "hard_compact",
             pre_tokens,

@@ -1,5 +1,4 @@
 use super::*;
-use crate::message::ToolDefinition;
 
 impl App {
     pub(super) fn append_current_turn_system_reminder(
@@ -81,6 +80,8 @@ impl App {
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt =
                 self.build_system_prompt_split(memory_pending.as_ref().map(|p| p.prompt.as_str()));
+            let provider_messages =
+                self.prepare_provider_context_view(&provider_messages, &split_prompt, &tools);
             self.context_info.tool_defs_count = tools.len();
             self.context_info.tool_defs_chars = ToolDefinition::aggregate_prompt_chars(&tools);
             if let Some(pending) = &memory_pending {
@@ -99,7 +100,6 @@ impl App {
                 provider_messages.len()
             ));
             let api_start = std::time::Instant::now();
-
             // Clone data needed for the API call to avoid borrow issues
             // The future would hold references across the select! which conflicts with handle_key
             let provider = self.provider.clone();

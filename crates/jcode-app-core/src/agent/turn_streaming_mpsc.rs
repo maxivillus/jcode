@@ -144,10 +144,10 @@ impl Agent {
             }
 
             let tools = self.tool_definitions().await;
-            let messages: std::sync::Arc<[Message]> = messages.into();
+            let history_messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending = self.build_memory_prompt_nonblocking_shared(
-                std::sync::Arc::clone(&messages),
+                std::sync::Arc::clone(&history_messages),
                 Some(std::sync::Arc::new({
                     let event_tx = event_tx.clone();
                     move |event| {
@@ -158,26 +158,24 @@ impl Agent {
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split(None);
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
+            let messages = self.project_context(&history_messages, &split_prompt, &tools);
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
             self.record_client_cache_request(&messages);
-
             // `messages` now owns the provider-facing request snapshot. Do not
             // retain the session's second, derived copy for the entire network
             // wait and response stream.
             self.session.release_provider_messages_cache();
-
             let mut cache_signature_messages =
                 if crate::config::config().features.message_timestamps {
                     Message::with_timestamps(&messages)
                 } else {
-                    messages.iter().cloned().collect()
+                    messages.to_vec()
                 };
             let mut ephemeral_signature_messages = Vec::new();
-
             // Inject memory as a user message at the end (preserves cache prefix)
-            let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
+            let mut messages_with_memory: Vec<Message> = messages.clone();
             if let Some(memory) = memory_pending.as_ref() {
                 let memory_count = memory.count.max(1);
                 let computed_age_ms = memory.computed_at.elapsed().as_millis() as u64;
@@ -244,6 +242,7 @@ impl Agent {
             if !self.final_provider_revision_gate(context_revision) {
                 continue;
             }
+            log_request("mpsc", self, context_plan, send_messages, &tools);
             let mut stream = {
                 let mut complete_future = std::pin::pin!(provider.complete_split(
                     send_messages,
@@ -257,6 +256,7 @@ impl Agent {
                     &tools,
                     &split_prompt.static_part,
                     &ephemeral_signature_messages,
+                    self.provider_context_generation(),
                 ));
                 // These vectors are only needed to build the cache telemetry event.
                 // Explicitly release their deeply cloned transcript strings before
@@ -1016,7 +1016,7 @@ impl Agent {
                 cache_read_input_tokens: usage_cache_read,
                 cache_creation_input_tokens: usage_cache_creation,
             };
-            if !self.record_context_usage(context_revision, usage_input) {
+            if !record_and_log_usage(self, "mpsc", context_revision, usage_input) {
                 clear_stale_stream_text(&event_tx);
                 break;
             }

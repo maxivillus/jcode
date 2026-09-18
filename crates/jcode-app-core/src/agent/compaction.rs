@@ -3,7 +3,9 @@ use crate::context_controller::ContextActionOutcome;
 
 impl Agent {
     pub(super) fn note_compaction_applied(&mut self) {
+        self.bump_provider_context_generation();
         self.cache_tracker.reset();
+        self.provider_context_view.reset();
         self.locked_tools = None;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
@@ -159,16 +161,26 @@ impl Agent {
             }
         };
 
-        self.cache_tracker.reset();
-        self.locked_tools = None;
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        self.note_compaction_applied();
         self.note_transcript_mutation();
 
         logging::warn(&format!(
             "Context limit exceeded; auto-compacted and retrying (dropped {} messages, usage was {:.1}%)",
             dropped, usage_pct
         ));
+        crate::logging::event_info(
+            "CONTEXT_COMPACTION_RECOVERY",
+            vec![
+                ("mode".to_string(), "context_limit_auto".to_string()),
+                ("status".to_string(), "applied".to_string()),
+                ("dropped_messages".to_string(), dropped.to_string()),
+                ("usage_percent".to_string(), format!("{usage_pct:.1}")),
+                (
+                    "context_limit_tokens".to_string(),
+                    context_limit.to_string(),
+                ),
+            ],
+        );
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
                 "auto_compaction_applied",
@@ -215,10 +227,7 @@ impl Agent {
 
         match compacted {
             Ok((dropped, usage_pct)) => {
-                self.cache_tracker.reset();
-                self.locked_tools = None;
-                self.provider_session_id = None;
-                self.session.provider_session_id = None;
+                self.note_compaction_applied();
                 self.note_transcript_mutation();
                 self.refresh_prune_projections();
                 logging::info(&format!(
@@ -278,15 +287,19 @@ impl Agent {
             self.sync_session_compaction_state_from_manager(&manager);
         }
 
-        self.cache_tracker.reset();
-        self.locked_tools = None;
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        self.note_compaction_applied();
 
         logging::warn(&format!(
             "Request body exceeded provider size limit; stripped {} oversized inline image(s) and retrying",
             stripped
         ));
+        crate::logging::event_info(
+            "CONTEXT_PAYLOAD_RECOVERY",
+            vec![
+                ("status".to_string(), "applied".to_string()),
+                ("images_stripped".to_string(), stripped.to_string()),
+            ],
+        );
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
                 "payload_too_large_recovered",
@@ -322,13 +335,17 @@ impl Agent {
             return false;
         }
 
-        self.cache_tracker.reset();
-        self.locked_tools = None;
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        self.note_compaction_applied();
 
         logging::warn(
             "OpenAI native compaction payload exceeded provider size limit; discarded native state and retrying with text fallback",
+        );
+        crate::logging::event_info(
+            "CONTEXT_NATIVE_COMPACTION_RECOVERY",
+            vec![
+                ("status".to_string(), "applied".to_string()),
+                ("fallback".to_string(), "text".to_string()),
+            ],
         );
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(

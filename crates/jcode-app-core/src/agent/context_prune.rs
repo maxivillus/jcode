@@ -410,6 +410,19 @@ impl Agent {
         let pruned = self.apply_prune(&spec);
 
         if pruned == 0 {
+            crate::logging::event_debug(
+                "CONTEXT_PRUNE",
+                vec![
+                    ("status".to_string(), "skipped".to_string()),
+                    ("kind".to_string(), spec.kind.tool_name().to_string()),
+                    ("items".to_string(), "0".to_string()),
+                    ("before_tokens".to_string(), before_tokens.to_string()),
+                    (
+                        "revision".to_string(),
+                        self.context_revision().0.to_string(),
+                    ),
+                ],
+            );
             return ContextActionOutcome::Skipped {
                 reason: prune_skip_reason(&spec),
             };
@@ -424,6 +437,19 @@ impl Agent {
                 "Context prune ({:?}) was rolled back: {gap}",
                 spec.kind
             ));
+            crate::logging::event_warn(
+                "CONTEXT_PRUNE",
+                vec![
+                    ("status".to_string(), "rolled_back".to_string()),
+                    ("kind".to_string(), spec.kind.tool_name().to_string()),
+                    ("items".to_string(), pruned.to_string()),
+                    ("before_tokens".to_string(), before_tokens.to_string()),
+                    (
+                        "revision".to_string(),
+                        self.context_revision().0.to_string(),
+                    ),
+                ],
+            );
             return ContextActionOutcome::Failed {
                 reason: format!("{gap}; the transcript was left unchanged"),
             };
@@ -432,6 +458,7 @@ impl Agent {
         self.session.prune_undo_snapshot = Some(snapshot);
         self.session.updated_at = chrono::Utc::now();
         self.invalidate_provider_context("context prune");
+        self.provider_context_view.reset();
         self.locked_tools = None;
         self.reset_tool_output_tracking();
         self.note_transcript_mutation();
@@ -442,6 +469,27 @@ impl Agent {
             "Model-requested context prune ({:?}): {pruned} item(s), estimated tokens {before_tokens} -> {after_tokens}",
             spec.kind
         ));
+        crate::logging::event_info(
+            "CONTEXT_PRUNE_APPLIED",
+            vec![
+                ("kind".to_string(), spec.kind.tool_name().to_string()),
+                ("items".to_string(), pruned.to_string()),
+                ("before_tokens".to_string(), before_tokens.to_string()),
+                ("after_tokens".to_string(), after_tokens.to_string()),
+                (
+                    "tokens_saved".to_string(),
+                    before_tokens.saturating_sub(after_tokens).to_string(),
+                ),
+                (
+                    "message_count".to_string(),
+                    self.session.messages.len().to_string(),
+                ),
+                (
+                    "revision".to_string(),
+                    self.context_revision().0.to_string(),
+                ),
+            ],
+        );
         ContextActionOutcome::Completed {
             detail: format!(
                 "pruned {pruned} item(s); estimated tokens {before_tokens} -> {after_tokens}"
@@ -480,20 +528,54 @@ impl Agent {
     /// Возвращает историю и provider-сессию к состоянию до последней обрезки.
     pub(super) fn undo_prune_for_model_request(&mut self) -> ContextActionOutcome {
         let Some(snapshot) = self.session.prune_undo_snapshot.take() else {
+            crate::logging::event_debug(
+                "CONTEXT_PRUNE",
+                vec![
+                    ("status".to_string(), "undo_skipped".to_string()),
+                    ("reason".to_string(), "no_snapshot".to_string()),
+                    (
+                        "revision".to_string(),
+                        self.context_revision().0.to_string(),
+                    ),
+                ],
+            );
             return ContextActionOutcome::Skipped {
                 reason: "no context prune to undo".to_string(),
             };
         };
+        let before_tokens = self.provider_token_estimate();
         self.session.replace_messages(snapshot.messages);
         self.provider_session_id = snapshot.provider_session_id;
         self.session.provider_session_id = snapshot.session_provider_session_id;
         self.session.updated_at = chrono::Utc::now();
+        self.bump_provider_context_generation();
         self.cache_tracker.reset();
+        self.provider_context_view.reset();
         self.locked_tools = None;
         self.reset_tool_output_tracking();
         self.note_transcript_mutation();
         self.persist_session_best_effort("context prune undo");
         self.refresh_prune_projections();
+        let after_tokens = self.provider_token_estimate();
+        crate::logging::event_info(
+            "CONTEXT_PRUNE_UNDO_APPLIED",
+            vec![
+                ("before_tokens".to_string(), before_tokens.to_string()),
+                ("after_tokens".to_string(), after_tokens.to_string()),
+                (
+                    "tokens_restored".to_string(),
+                    after_tokens.saturating_sub(before_tokens).to_string(),
+                ),
+                (
+                    "message_count".to_string(),
+                    self.session.messages.len().to_string(),
+                ),
+                (
+                    "revision".to_string(),
+                    self.context_revision().0.to_string(),
+                ),
+            ],
+        );
         ContextActionOutcome::Completed {
             detail: "restored the transcript from before the last prune".to_string(),
         }

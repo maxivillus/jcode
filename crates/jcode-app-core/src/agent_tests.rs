@@ -6,7 +6,7 @@ use crate::tool::{Registry, ToolOutput};
 use async_trait::async_trait;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-
+include!("agent_tests/context_control.rs");
 struct DelayedProvider {
     open_delay: Duration,
     first_event_delay: Duration,

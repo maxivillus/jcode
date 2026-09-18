@@ -2,6 +2,8 @@
 
 use super::*;
 use crate::execution_state::{ExecutionStateError, ExecutionStateRevision, PatchValue};
+use std::sync::{Arc, Barrier, Mutex};
+use std::thread;
 
 fn components(value: &str) -> ContextComponentHashes {
     ContextComponentHashes::from_texts(Some(value), None, None, None, None, None)
@@ -81,6 +83,58 @@ fn stale_controller_patch_is_rejected_atomically() {
         ExecutionStateError::RevisionMismatch { .. }
     ));
     assert_eq!(controller.execution_state(), &before);
+}
+
+#[test]
+fn concurrent_direct_writers_are_rejected_after_the_first_revision_commit() {
+    let controller = Arc::new(Mutex::new(ContextController::default()));
+    let (state_schema, expected_revision) = {
+        let controller = controller.lock().expect("controller lock");
+        (
+            controller.execution_state().state_schema.clone(),
+            controller.execution_state().revision,
+        )
+    };
+    let barrier = Arc::new(Barrier::new(2));
+    let mut handles = Vec::new();
+
+    for phase in ["writer-a", "writer-b"] {
+        let controller = Arc::clone(&controller);
+        let barrier = Arc::clone(&barrier);
+        let state_schema = state_schema.clone();
+        handles.push(thread::spawn(move || {
+            let mut patch = ExecutionStatePatch::new(state_schema, expected_revision);
+            patch.phase = Some(PatchValue::Set(phase.to_string()));
+            barrier.wait();
+            controller
+                .lock()
+                .expect("controller lock")
+                .apply_execution_state_patch(&patch)
+        }));
+    }
+
+    let results = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("writer thread must finish"))
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(ExecutionStateError::RevisionMismatch { .. })))
+            .count(),
+        1
+    );
+
+    let controller = controller.lock().expect("controller lock");
+    assert_eq!(
+        controller.execution_state().revision,
+        ExecutionStateRevision(expected_revision.0 + 1)
+    );
+    assert!(matches!(
+        controller.execution_state().phase.as_deref(),
+        Some("writer-a" | "writer-b")
+    ));
 }
 
 #[test]

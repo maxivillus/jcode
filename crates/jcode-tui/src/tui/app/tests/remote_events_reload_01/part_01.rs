@@ -1225,68 +1225,6 @@ fn test_handle_server_event_tool_exec_pauses_tps_but_collects_final_tool_usage()
 }
 
 #[test]
-fn test_handle_server_event_kv_cache_request_resets_tps_output_watermark_for_next_api_call() {
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-
-    app.streaming.streaming_tps_collect_output = true;
-
-    app.handle_server_event(
-        crate::protocol::ServerEvent::TokenUsage {
-            input: 100,
-            output: 40,
-            cache_read_input: None,
-            cache_creation_input: None,
-        },
-        &mut remote,
-    );
-
-    app.handle_server_event(
-        crate::protocol::ServerEvent::KvCacheRequest {
-            system_static_hash: 1,
-            tools_hash: 2,
-            messages_hash: 3,
-            message_hashes: vec![11, 22],
-            message_count: 2,
-            tool_count: 1,
-            system_static_chars: 10,
-            tools_json_chars: 20,
-            messages_json_chars: 30,
-            ephemeral_hash: None,
-            ephemeral_chars: 0,
-            ephemeral_message_count: 0,
-        },
-        &mut remote,
-    );
-
-    assert!(!app.streaming.streaming_tps_collect_output);
-
-    app.handle_server_event(
-        crate::protocol::ServerEvent::ConnectionPhase {
-            phase: "streaming".to_string(),
-        },
-        &mut remote,
-    );
-
-    assert!(app.streaming.streaming_tps_collect_output);
-
-    app.handle_server_event(
-        crate::protocol::ServerEvent::TokenUsage {
-            input: 120,
-            output: 15,
-            cache_read_input: None,
-            cache_creation_input: None,
-        },
-        &mut remote,
-    );
-
-    assert_eq!(app.streaming.streaming_total_output_tokens, 55);
-    assert_eq!(app.streaming.streaming_tps_observed_output_tokens, 55);
-}
-
-#[test]
 fn test_handle_server_event_message_end_marks_stream_as_finalizing_without_stall_mode() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

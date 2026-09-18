@@ -189,3 +189,84 @@ async fn context_prune_undo_survives_real_process_restart() {
     assert_eq!(restored_ids, before_ids);
     assert!(restored.prune_undo_snapshot.is_none());
 }
+
+#[tokio::test]
+async fn context_prune_snapshot_survives_child_abort_before_recovery() {
+    const CHILD_MARKER: &str = "JCODE_CONTEXT_PRUNE_ABORT_CHILD";
+    const SESSION_ID: &str = "JCODE_CONTEXT_PRUNE_ABORT_SESSION_ID";
+
+    if std::env::var_os(CHILD_MARKER).is_some() {
+        let _guard = crate::storage::lock_test_env();
+        let session_id = std::env::var(SESSION_ID).expect("child session id");
+        let persisted = crate::session::Session::load(&session_id).expect("load after abort");
+        assert!(persisted.prune_undo_snapshot.is_some());
+        std::process::abort();
+    }
+
+    let _guard = crate::storage::lock_test_env();
+    let _env = IsolatedSessionPersistenceEnv::new();
+    let mut agent = test_agent().await;
+    for index in 0..8 {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("turn {index}"),
+                cache_control: None,
+            }],
+        );
+    }
+    let before_ids = agent
+        .session
+        .messages
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<Vec<_>>();
+
+    agent
+        .queue_user_prune(ContextPruneSpec::new(ContextPruneKind::Turns).keep_recent(2))
+        .expect("a user prune request must be accepted");
+    agent.apply_pending_context_actions();
+
+    let session_id = agent.session_id().to_string();
+    let persisted = crate::session::Session::load(&session_id).expect("prune should be durable");
+    assert!(persisted.prune_undo_snapshot.is_some());
+    assert!(persisted.messages.len() < before_ids.len());
+
+    let status = tokio::process::Command::new(
+        std::env::current_exe().expect("resolve current test executable"),
+    )
+    .arg("context_prune_snapshot_survives_child_abort_before_recovery")
+    .arg("--nocapture")
+    .env(CHILD_MARKER, "1")
+    .env(SESSION_ID, &session_id)
+    .status()
+    .await
+    .expect("spawn abort child");
+    assert!(!status.success(), "abort child must terminate abnormally");
+
+    let after_abort = crate::session::Session::load(&session_id).expect("parent readback");
+    assert!(after_abort.prune_undo_snapshot.is_some());
+    assert!(after_abort.messages.len() < before_ids.len());
+
+    let provider = agent.provider.fork();
+    let registry = Registry::new(provider.clone()).await;
+    let mut restored = Agent::new_with_session(provider, registry, after_abort, None);
+    restored
+        .queue_user_prune_undo()
+        .expect("aborted prune should remain undoable");
+    restored.apply_pending_context_actions();
+
+    let restored_ids = restored
+        .session
+        .messages
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(restored_ids, before_ids);
+    assert!(
+        crate::session::Session::load(&session_id)
+            .expect("final readback")
+            .prune_undo_snapshot
+            .is_none()
+    );
+}

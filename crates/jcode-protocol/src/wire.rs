@@ -872,20 +872,20 @@ pub enum ServerEvent {
         ephemeral_chars: usize,
         #[serde(default)]
         ephemeral_message_count: usize,
+        /// Поколение постоянного контекста, отправляемого провайдеру.
+        /// Отсутствующее значение сохраняет совместимость со старыми узлами.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_generation: Option<u64>,
     },
-
     /// Active transport/connection type for the current stream
     #[serde(rename = "connection_type")]
     ConnectionType { connection: String },
-
     /// Connection phase update (authenticating, connecting, waiting, etc.)
     #[serde(rename = "connection_phase")]
     ConnectionPhase { phase: String },
-
     /// Provider-supplied human-readable transport detail for the current stream.
     #[serde(rename = "status_detail")]
     StatusDetail { detail: String },
-
     /// Provider has finished the visible assistant message, but the turn may still be
     /// finalizing bookkeeping such as session IDs or completion trailers.
     ///
