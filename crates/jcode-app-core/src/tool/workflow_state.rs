@@ -3,7 +3,11 @@ use super::{
     context_control::{ContextControllerBindings, context_controller_for_session},
 };
 use crate::context::ContextPlane;
-use crate::execution_state::{PatchValue, WorkflowStatePatch};
+use crate::execution_state::{
+    MAX_WORKFLOW_OBSERVATION_REVISION_CHARS, MAX_WORKFLOW_OBSERVATION_SOURCE_CHARS,
+    MAX_WORKFLOW_OBSERVED_AT_CHARS, OBSERVATION_STATUS_CONTRADICTED, OBSERVATION_STATUS_CURRENT,
+    OBSERVATION_STATUS_STALE, PatchValue, WorkflowRunState, WorkflowStatePatch,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -38,6 +42,10 @@ struct ObservationInput {
     text: String,
     #[serde(default)]
     source: Option<String>,
+    #[serde(default)]
+    source_revision: Option<String>,
+    #[serde(default)]
+    observed_at: Option<String>,
 }
 
 /// Ожидаемые значения для сверки без мутации состояния.
@@ -53,6 +61,78 @@ struct ReconcileExpectation {
 
 const MAX_OBSERVATION_CHARS: usize = 500;
 const MAX_EVIDENCE_REFS: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObservationDisposition {
+    Current,
+    Duplicate,
+    Stale,
+    Contradicted,
+}
+
+fn trailing_revision_number(value: &str) -> Option<u64> {
+    let start = value
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !character.is_ascii_digit())
+        .map_or(0, |(index, _)| index + 1);
+    value.get(start..)?.parse().ok()
+}
+
+fn classify_observation(
+    state: &WorkflowRunState,
+    source: Option<&str>,
+    source_revision: Option<&str>,
+    text: &str,
+) -> ObservationDisposition {
+    let Some(previous_text) = state.last_observation.as_deref() else {
+        return ObservationDisposition::Current;
+    };
+
+    if state.observation_source.as_deref() != source {
+        return ObservationDisposition::Current;
+    }
+
+    if state.last_observation_revision.as_deref() == source_revision {
+        return if previous_text == text
+            && state.observation_status.as_deref() == Some(OBSERVATION_STATUS_CURRENT)
+        {
+            ObservationDisposition::Duplicate
+        } else {
+            ObservationDisposition::Contradicted
+        };
+    }
+
+    match (
+        state
+            .last_observation_revision
+            .as_deref()
+            .and_then(trailing_revision_number),
+        source_revision.and_then(trailing_revision_number),
+    ) {
+        (Some(previous), Some(incoming)) if incoming < previous => ObservationDisposition::Stale,
+        (Some(previous), Some(incoming)) if incoming == previous => {
+            ObservationDisposition::Contradicted
+        }
+        (Some(_), None) => ObservationDisposition::Stale,
+        _ => ObservationDisposition::Current,
+    }
+}
+
+fn format_observation_evidence(
+    source: Option<&str>,
+    source_revision: Option<&str>,
+    status: &str,
+    text: &str,
+) -> String {
+    if source_revision.is_none() && status == OBSERVATION_STATUS_CURRENT {
+        return source.map_or_else(|| text.to_string(), |value| format!("{value}: {text}"));
+    }
+
+    let source = source.unwrap_or("observation");
+    let revision = source_revision.map_or_else(String::new, |value| format!("#{value}"));
+    format!("{source}{revision} [{status}]: {text}")
+}
 
 fn default_action() -> String {
     "get_state".to_string()
@@ -93,6 +173,11 @@ fn patch_schema() -> Value {
             "blockers": nullable_list_schema("Blockers, or null to clear them."),
             "next_action": nullable_text_schema("Next action, or null to clear it."),
             "source_revision": nullable_text_schema("Source revision, or null to clear it."),
+            "last_observation": nullable_text_schema("Last observation value, or null to clear it."),
+            "observation_source": nullable_text_schema("Observation source, or null to clear it."),
+            "last_observation_revision": nullable_text_schema("Revision attached to the last observation, or null to clear it."),
+            "observation_status": nullable_text_schema("Observation status: current, stale, or contradicted."),
+            "observed_at": nullable_text_schema("Observation timestamp, or null to clear it."),
             "evidence_refs": nullable_list_schema("Bounded evidence references, or null to clear them."),
             "owner": nullable_text_schema("State owner, or null to clear it."),
             "lease": nullable_text_schema("Lease identifier, or null to clear it."),
@@ -148,6 +233,8 @@ impl Tool for WorkflowStateTool {
                             "type": "string",
                             "description": "Where the observation came from.",
                         },
+                        "source_revision": nullable_text_schema("Opaque source revision used for freshness checks."),
+                        "observed_at": nullable_text_schema("Observation timestamp when available."),
                     },
                     "additionalProperties": false,
                 },
@@ -216,21 +303,81 @@ impl Tool for WorkflowStateTool {
                 if text.chars().count() > MAX_OBSERVATION_CHARS {
                     anyhow::bail!("observation text exceeds {MAX_OBSERVATION_CHARS} characters");
                 }
-                let entry = match observation
+                let source = observation
                     .source
                     .as_deref()
                     .map(str::trim)
-                    .filter(|source| !source.is_empty())
+                    .filter(|source| !source.is_empty());
+                if source.is_some_and(|value| {
+                    value.chars().count() > MAX_WORKFLOW_OBSERVATION_SOURCE_CHARS
+                }) {
+                    anyhow::bail!(
+                        "observation source exceeds {MAX_WORKFLOW_OBSERVATION_SOURCE_CHARS} characters"
+                    );
+                }
+                let source_revision = observation
+                    .source_revision
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|revision| !revision.is_empty());
+                if source_revision.is_some_and(|value| {
+                    value.chars().count() > MAX_WORKFLOW_OBSERVATION_REVISION_CHARS
+                }) {
+                    anyhow::bail!(
+                        "observation source revision exceeds {MAX_WORKFLOW_OBSERVATION_REVISION_CHARS} characters"
+                    );
+                }
+                let observed_at = observation
+                    .observed_at
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|timestamp| !timestamp.is_empty());
+                if observed_at
+                    .is_some_and(|value| value.chars().count() > MAX_WORKFLOW_OBSERVED_AT_CHARS)
                 {
-                    Some(source) => format!("{source}: {text}"),
-                    None => text.to_string(),
+                    anyhow::bail!(
+                        "observation timestamp exceeds {MAX_WORKFLOW_OBSERVED_AT_CHARS} characters"
+                    );
+                }
+
+                let disposition = classify_observation(
+                    controller.workflow_run_state(),
+                    source,
+                    source_revision,
+                    text,
+                );
+                let status = match disposition {
+                    ObservationDisposition::Current | ObservationDisposition::Duplicate => {
+                        OBSERVATION_STATUS_CURRENT
+                    }
+                    ObservationDisposition::Stale => OBSERVATION_STATUS_STALE,
+                    ObservationDisposition::Contradicted => OBSERVATION_STATUS_CONTRADICTED,
                 };
+                let entry = format_observation_evidence(source, source_revision, status, text);
                 let (schema, revision, mut evidence) = {
                     let state = controller.workflow_run_state();
                     let evidence: Vec<String> =
                         state.evidence_refs.iter().flatten().cloned().collect();
                     (state.state_schema.clone(), state.revision, evidence)
                 };
+
+                if disposition == ObservationDisposition::Duplicate {
+                    let state = controller.workflow_run_state();
+                    return Ok(output(
+                        "workflow_state",
+                        json!({
+                            "action": "record_observation",
+                            "plane": ContextPlane::Evidence,
+                            "applied": false,
+                            "mutated": false,
+                            "duplicate": true,
+                            "freshness_status": OBSERVATION_STATUS_CURRENT,
+                            "revision": state.revision,
+                            "evidence_count": state.evidence_refs.as_ref().map_or(0, Vec::len),
+                        }),
+                    ));
+                }
+
                 if evidence.len() >= MAX_EVIDENCE_REFS {
                     anyhow::bail!(
                         "evidence list is full ({MAX_EVIDENCE_REFS}); reconcile it before adding more"
@@ -239,6 +386,26 @@ impl Tool for WorkflowStateTool {
                 evidence.push(entry);
                 let mut patch = WorkflowStatePatch::new(schema, revision);
                 patch.evidence_refs = Some(PatchValue::Set(evidence));
+                if disposition == ObservationDisposition::Current {
+                    patch.last_observation = Some(PatchValue::Set(text.to_string()));
+                    patch.observation_source = Some(match source {
+                        Some(value) => PatchValue::Set(value.to_string()),
+                        None => PatchValue::Clear,
+                    });
+                    patch.last_observation_revision = Some(match source_revision {
+                        Some(value) => PatchValue::Set(value.to_string()),
+                        None => PatchValue::Clear,
+                    });
+                    patch.observation_status =
+                        Some(PatchValue::Set(OBSERVATION_STATUS_CURRENT.to_string()));
+                    patch.observed_at = Some(match observed_at {
+                        Some(value) => PatchValue::Set(value.to_string()),
+                        None => PatchValue::Clear,
+                    });
+                    if let Some(source_revision) = source_revision {
+                        patch.source_revision = Some(PatchValue::Set(source_revision.to_string()));
+                    }
+                }
                 let revision = controller.apply_workflow_state_patch(&patch)?;
                 let state = controller.workflow_run_state();
                 json!({
@@ -246,6 +413,8 @@ impl Tool for WorkflowStateTool {
                     "plane": ContextPlane::Evidence,
                     "applied": true,
                     "mutated": true,
+                    "freshness_status": status,
+                    "duplicate": false,
                     "revision": revision,
                     "evidence_count": state.evidence_refs.as_ref().map_or(0, Vec::len),
                 })
@@ -259,6 +428,11 @@ impl Tool for WorkflowStateTool {
                     "mutated": false,
                     "revision": state.revision,
                     "source_revision": state.source_revision,
+                    "last_observation": state.last_observation,
+                    "observation_source": state.observation_source,
+                    "last_observation_revision": state.last_observation_revision,
+                    "observation_status": state.observation_status,
+                    "observed_at": state.observed_at,
                     "owner": state.owner,
                     "lease": state.lease,
                     "evidence_refs": evidence,
@@ -570,6 +744,147 @@ mod tests {
             .clone()
             .unwrap_or_default();
         assert_eq!(evidence, vec!["cargo test: tests pass".to_string()]);
+        assert_eq!(
+            controller.workflow_run_state().last_observation.as_deref(),
+            Some("tests pass")
+        );
+        assert_eq!(
+            controller
+                .workflow_run_state()
+                .observation_status
+                .as_deref(),
+            Some(OBSERVATION_STATUS_CURRENT)
+        );
+    }
+
+    #[tokio::test]
+    async fn record_observation_replaces_newer_source_and_rejects_old_or_duplicate_values() {
+        let (tool, controller, _ctx) = bound_tool("workflow-freshness");
+
+        tool.execute(
+            json!({
+                "action": "record_observation",
+                "observation": {
+                    "text": "value: old",
+                    "source": "source",
+                    "source_revision": "source:v1",
+                    "observed_at": "2026-09-18T00:00:00Z"
+                }
+            }),
+            tool_context("workflow-freshness"),
+        )
+        .await
+        .expect("initial observation should apply");
+
+        tool.execute(
+            json!({
+                "action": "record_observation",
+                "observation": {
+                    "text": "value: new",
+                    "source": "source",
+                    "source_revision": "source:v2",
+                    "observed_at": "2026-09-18T00:01:00Z"
+                }
+            }),
+            tool_context("workflow-freshness"),
+        )
+        .await
+        .expect("newer observation should replace the old value");
+
+        {
+            let state = controller.lock().expect("controller lock");
+            assert_eq!(
+                state.workflow_run_state().source_revision.as_deref(),
+                Some("source:v2")
+            );
+            assert_eq!(
+                state.workflow_run_state().last_observation.as_deref(),
+                Some("value: new")
+            );
+            let summary = state.workflow_run_state().prompt_summary();
+            assert!(summary.contains("value: new"));
+            assert!(!summary.contains("value: old"));
+        }
+
+        let duplicate = tool
+            .execute(
+                json!({
+                    "action": "record_observation",
+                    "observation": {
+                        "text": "value: new",
+                        "source": "source",
+                        "source_revision": "source:v2"
+                    }
+                }),
+                tool_context("workflow-freshness"),
+            )
+            .await
+            .expect("duplicate observation should be accepted as a no-op");
+        let duplicate_metadata = duplicate.metadata.expect("duplicate metadata");
+        assert_eq!(duplicate_metadata["duplicate"], json!(true));
+        assert_eq!(duplicate_metadata["mutated"], json!(false));
+        assert_eq!(duplicate_metadata["revision"], json!(2));
+
+        let stale = tool
+            .execute(
+                json!({
+                    "action": "record_observation",
+                    "observation": {
+                        "text": "value: old again",
+                        "source": "source",
+                        "source_revision": "source:v1"
+                    }
+                }),
+                tool_context("workflow-freshness"),
+            )
+            .await
+            .expect("stale observation should be recorded outside current state");
+        let stale_metadata = stale.metadata.expect("stale metadata");
+        assert_eq!(
+            stale_metadata["freshness_status"],
+            json!(OBSERVATION_STATUS_STALE)
+        );
+
+        let contradiction = tool
+            .execute(
+                json!({
+                    "action": "record_observation",
+                    "observation": {
+                        "text": "value: contradictory",
+                        "source": "source",
+                        "source_revision": "source:v2"
+                    }
+                }),
+                tool_context("workflow-freshness"),
+            )
+            .await
+            .expect("contradictory observation should be recorded outside current state");
+        let contradiction_metadata = contradiction.metadata.expect("contradiction metadata");
+        assert_eq!(
+            contradiction_metadata["freshness_status"],
+            json!(OBSERVATION_STATUS_CONTRADICTED)
+        );
+
+        let state = controller.lock().expect("controller lock");
+        assert_eq!(
+            state.workflow_run_state().last_observation.as_deref(),
+            Some("value: new")
+        );
+        assert_eq!(
+            state.workflow_run_state().revision,
+            WorkflowRunRevision::new(4)
+        );
+        let evidence = state
+            .workflow_run_state()
+            .evidence_refs
+            .clone()
+            .unwrap_or_default();
+        assert!(evidence.iter().any(|entry| entry.contains("[stale]")));
+        assert!(
+            evidence
+                .iter()
+                .any(|entry| entry.contains("[contradicted]"))
+        );
     }
 
     #[tokio::test]

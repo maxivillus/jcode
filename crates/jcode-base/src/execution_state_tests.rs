@@ -66,6 +66,46 @@ fn prompt_summary_uses_latest_source_revision_after_observation_patch() {
 }
 
 #[test]
+fn prompt_summary_replaces_old_observation_and_redacts_stale_value() {
+    let mut state = ExecutionState::new("sample-workflow").unwrap();
+    let mut first = ExecutionStatePatch::new("sample-workflow", state.revision);
+    first.source_revision = Some(PatchValue::Set("source:v1".to_string()));
+    first.last_observation = Some(PatchValue::Set("value: old".to_string()));
+    first.observation_source = Some(PatchValue::Set("source".to_string()));
+    first.last_observation_revision = Some(PatchValue::Set("source:v1".to_string()));
+    first.observation_status = Some(PatchValue::Set(OBSERVATION_STATUS_CURRENT.to_string()));
+    first.observed_at = Some(PatchValue::Set("2026-09-18T00:00:00Z".to_string()));
+    state.apply_patch(&first).unwrap();
+
+    let current = state.prompt_summary();
+    assert!(current.contains("value: old"));
+    assert!(current.contains("observation_status: current"));
+
+    let mut refreshed = ExecutionStatePatch::new("sample-workflow", state.revision);
+    refreshed.source_revision = Some(PatchValue::Set("source:v2".to_string()));
+    refreshed.last_observation = Some(PatchValue::Set("value: new".to_string()));
+    refreshed.last_observation_revision = Some(PatchValue::Set("source:v2".to_string()));
+    refreshed.observation_status = Some(PatchValue::Set(OBSERVATION_STATUS_CURRENT.to_string()));
+    refreshed.observed_at = Some(PatchValue::Set("2026-09-18T00:01:00Z".to_string()));
+    state.apply_patch(&refreshed).unwrap();
+
+    let refreshed_summary = state.prompt_summary();
+    assert!(refreshed_summary.contains("value: new"));
+    assert!(!refreshed_summary.contains("value: old"));
+
+    let mut stale = ExecutionStatePatch::new("sample-workflow", state.revision);
+    stale.last_observation = Some(PatchValue::Set("value: stale".to_string()));
+    stale.last_observation_revision = Some(PatchValue::Set("source:v1".to_string()));
+    stale.observation_status = Some(PatchValue::Set(OBSERVATION_STATUS_STALE.to_string()));
+    state.apply_patch(&stale).unwrap();
+
+    let stale_summary = state.prompt_summary();
+    assert!(stale_summary.contains("observation_status: stale"));
+    assert!(stale_summary.contains("value omitted because observation is not current"));
+    assert!(!stale_summary.contains("value: stale"));
+}
+
+#[test]
 fn contract_serializes_all_machine_readable_fields() {
     let state = ExecutionState::new("code-review").unwrap();
     let encoded = serde_json::to_value(state.contract()).unwrap();
