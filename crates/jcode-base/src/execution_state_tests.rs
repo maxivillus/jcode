@@ -44,6 +44,28 @@ fn prompt_summary_clips_long_utf8_values_without_breaking_boundaries() {
 }
 
 #[test]
+fn prompt_summary_uses_latest_source_revision_after_observation_patch() {
+    let mut state = ExecutionState::new("weather-check").unwrap();
+    let mut first_observation = ExecutionStatePatch::new("weather-check", state.revision);
+    first_observation.source_revision = Some(PatchValue::Set("weather:v1".to_string()));
+    state.apply_patch(&first_observation).unwrap();
+
+    assert!(
+        state
+            .prompt_summary()
+            .contains("source_revision: weather:v1")
+    );
+
+    let mut refreshed_observation = ExecutionStatePatch::new("weather-check", state.revision);
+    refreshed_observation.source_revision = Some(PatchValue::Set("weather:v2".to_string()));
+    state.apply_patch(&refreshed_observation).unwrap();
+
+    let summary = state.prompt_summary();
+    assert!(summary.contains("source_revision: weather:v2"));
+    assert!(!summary.contains("weather:v1"));
+}
+
+#[test]
 fn contract_serializes_all_machine_readable_fields() {
     let state = ExecutionState::new("code-review").unwrap();
     let encoded = serde_json::to_value(state.contract()).unwrap();
