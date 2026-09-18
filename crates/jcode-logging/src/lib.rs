@@ -65,7 +65,8 @@ impl LogLevel {
 
 fn minimum_log_level() -> Option<LogLevel> {
     let trace_enabled = std::env::var_os("JCODE_TRACE").is_some();
-    let configured = std::env::var("JCODE_LOG_LEVEL").ok();
+    let configured = std::env::var_os("JCODE_LOG_LEVEL")
+        .and_then(|value| value.as_os_str().to_str().map(str::to_owned));
     minimum_log_level_from_env(trace_enabled, configured.as_deref())
 }
 
@@ -192,11 +193,15 @@ fn log_dir() -> Option<PathBuf> {
 }
 
 fn configured_log_max_bytes() -> u64 {
-    std::env::var("JCODE_LOG_MAX_BYTES")
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_LOG_MAX_BYTES)
+    let Some(value) = std::env::var_os("JCODE_LOG_MAX_BYTES")
+        .and_then(|value| value.as_os_str().to_str().map(str::to_owned))
+    else {
+        return DEFAULT_LOG_MAX_BYTES;
+    };
+    match value.trim().parse::<u64>() {
+        Ok(value) if value > 0 => value,
+        _ => DEFAULT_LOG_MAX_BYTES,
+    }
 }
 
 fn daily_log_path(log_dir: &Path, now: DateTime<Local>) -> PathBuf {

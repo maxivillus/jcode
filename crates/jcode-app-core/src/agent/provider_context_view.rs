@@ -78,7 +78,7 @@ impl ProviderContextViewState {
         let before_tokens = message_token_estimate(messages);
         let before_turn_groups = turn_group_ranges(messages).len();
         let source_prefix_hashes = rolling_prefix_hashes(messages);
-        let source_version = source_prefix_hashes.last().copied().unwrap_or_default();
+        let source_version = source_prefix_hashes.last().copied().unwrap_or(0);
         let usable_budget = provider_context_limit
             .saturating_sub(system_prompt_tokens)
             .saturating_sub(tool_definition_tokens)
@@ -135,7 +135,7 @@ impl ProviderContextViewState {
         let after_tokens = message_token_estimate(&output);
         let after_turn_groups = turn_group_ranges(&output).len();
         let view_prefix_hashes = rolling_prefix_hashes(&output);
-        let view_version = view_prefix_hashes.last().copied().unwrap_or_default();
+        let view_version = view_prefix_hashes.last().copied().unwrap_or(0);
         let summary_source_version = if summary_messages > 0 {
             Some(
                 cutoff
@@ -151,7 +151,7 @@ impl ProviderContextViewState {
                 || view_prefix_hashes
                     .get(previous.message_count.saturating_sub(1))
                     .copied()
-                    .unwrap_or_default()
+                    .unwrap_or(0)
                     != previous.prefix_hash
         });
 
@@ -159,7 +159,7 @@ impl ProviderContextViewState {
             let prefix_hash = selected_cutoff
                 .checked_sub(1)
                 .and_then(|index| source_prefix_hashes.get(index).copied())
-                .unwrap_or_default();
+                .unwrap_or(0);
             self.stable_boundary = Some(Boundary {
                 message_count: selected_cutoff,
                 prefix_hash,
@@ -205,7 +205,7 @@ fn rolling_prefix_hashes(messages: &[Message]) -> Vec<u64> {
                 .map(|prefix| extend_stable_hash(prefix, message_hash))
                 .unwrap_or(message_hash),
         );
-        hashes.push(current.unwrap_or_default());
+        hashes.push(current.unwrap_or(0));
     }
     hashes
 }
