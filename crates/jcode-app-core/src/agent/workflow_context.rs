@@ -1,6 +1,17 @@
 use super::Agent;
 use crate::logging;
 
+fn workflow_context_env_value(name: &str) -> Option<String> {
+    match std::env::var(name) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            logging::warn("Workflow context mode environment value is not valid Unicode");
+            None
+        }
+    }
+}
+
 impl Agent {
     /// Enables the state-first provider view for an active workflow by default.
     /// The transcript view remains an explicit compatibility opt-out.
@@ -33,9 +44,11 @@ impl Agent {
         if !self.has_active_workflow() {
             return false;
         }
+        let context_mode = workflow_context_env_value("JCODE_CONTEXT_MODE");
+        let legacy_state_first = workflow_context_env_value("JCODE_STATE_FIRST");
         let requested = Self::workflow_context_mode_requested_from_values(
-            std::env::var("JCODE_CONTEXT_MODE").ok().as_deref(),
-            std::env::var("JCODE_STATE_FIRST").ok().as_deref(),
+            context_mode.as_deref(),
+            legacy_state_first.as_deref(),
         );
         if !requested {
             return false;

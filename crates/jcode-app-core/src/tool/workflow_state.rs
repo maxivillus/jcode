@@ -106,7 +106,11 @@ fn trailing_revision_number(value: &str) -> Option<u64> {
         .rev()
         .find(|(_, character)| !character.is_ascii_digit())
         .map_or(0, |(index, _)| index + 1);
-    value.get(start..)?.parse().ok()
+    let suffix = value.get(start..)?;
+    match suffix.parse() {
+        Ok(number) => Some(number),
+        Err(_) => None,
+    }
 }
 
 fn classify_observation(
