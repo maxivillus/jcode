@@ -1102,6 +1102,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_commit_rounds_allow_one_writer_and_refuse_the_other() {
+        let (tool, controller, ctx) = bound_tool("round-concurrent");
+        let mut first_patch = WorkflowStatePatch::new("default", WorkflowRunRevision::INITIAL);
+        first_patch.phase = Some(PatchValue::Set("writer-a".to_string()));
+        let mut second_patch = WorkflowStatePatch::new("default", WorkflowRunRevision::INITIAL);
+        second_patch.phase = Some(PatchValue::Set("writer-b".to_string()));
+
+        let first = tool.execute(
+            json!({
+                "action": "commit_round",
+                "round": {
+                    "expected_revision": 0,
+                    "action": {"name": "writer-a", "status": "completed"},
+                    "state_patch": serde_json::to_value(first_patch).expect("state patch")
+                }
+            }),
+            ctx.clone(),
+        );
+        let second = tool.execute(
+            json!({
+                "action": "commit_round",
+                "round": {
+                    "expected_revision": 0,
+                    "action": {"name": "writer-b", "status": "completed"},
+                    "state_patch": serde_json::to_value(second_patch).expect("state patch")
+                }
+            }),
+            ctx,
+        );
+        let (first, second) = tokio::join!(first, second);
+        let first = first.expect("first concurrent result");
+        let second = second.expect("second concurrent result");
+        let first_applied = first.metadata.as_ref().is_some_and(|metadata| {
+            metadata["applied"] == json!(true) && metadata["mutated"] == json!(true)
+        });
+        let second_applied = second.metadata.as_ref().is_some_and(|metadata| {
+            metadata["applied"] == json!(true) && metadata["mutated"] == json!(true)
+        });
+        let first_refused = first.metadata.as_ref().is_some_and(|metadata| {
+            metadata["refused"] == json!(true) && metadata["mutated"] == json!(false)
+        });
+        let second_refused = second.metadata.as_ref().is_some_and(|metadata| {
+            metadata["refused"] == json!(true) && metadata["mutated"] == json!(false)
+        });
+
+        assert_eq!(first_applied as u8 + second_applied as u8, 1);
+        assert_eq!(first_refused as u8 + second_refused as u8, 1);
+
+        let state = controller.lock().expect("controller lock");
+        let workflow = state.workflow_run_state();
+        assert_eq!(workflow.revision, WorkflowRunRevision::new(1));
+        assert!(matches!(
+            workflow.phase.as_deref(),
+            Some("writer-a") | Some("writer-b")
+        ));
+        assert_eq!(workflow.last_action_status.as_deref(), Some("completed"));
+    }
+
+    #[tokio::test]
     async fn stale_patch_is_rejected_without_additional_mutation() {
         let (tool, controller, ctx) = bound_tool("state-stale");
         let patch = goal_patch(&controller);
