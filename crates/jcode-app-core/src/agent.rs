@@ -263,6 +263,39 @@ impl Agent {
         }
     }
 
+    /// Enables the state-first provider view only for an active skill and only
+    /// when explicitly requested. The default remains the transcript view so a
+    /// failed or uninitialized state never changes the existing path silently.
+    fn should_use_state_first_view(&self) -> bool {
+        if self.active_skill.is_none() {
+            return false;
+        }
+        let requested = match std::env::var("JCODE_STATE_FIRST") {
+            Ok(value) => {
+                let value = value.trim();
+                value == "1"
+                    || value.eq_ignore_ascii_case("true")
+                    || value.eq_ignore_ascii_case("on")
+            }
+            Err(_) => false,
+        };
+        if !requested {
+            return false;
+        }
+
+        let state_valid = self
+            .context_controller
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .execution_state()
+            .validate()
+            .is_ok();
+        if !state_valid {
+            logging::warn("State-first provider view disabled: execution state is invalid");
+        }
+        state_valid
+    }
+
     fn build_base(
         provider: Arc<dyn Provider>,
         registry: Registry,
@@ -807,18 +840,24 @@ impl Agent {
         tools: &[ToolDefinition],
     ) -> Vec<Message> {
         let tool_definition_tokens = ToolDefinition::aggregate_prompt_token_estimate(tools);
-        let result = self.provider_context_view.project(
-            messages,
-            self.provider.context_window(),
-            split_prompt.estimated_tokens(),
-            tool_definition_tokens,
-        );
+        let state_first = self.should_use_state_first_view();
+        let result = if state_first {
+            self.provider_context_view.project_state_first(messages)
+        } else {
+            self.provider_context_view.project(
+                messages,
+                self.provider.context_window(),
+                split_prompt.estimated_tokens(),
+                tool_definition_tokens,
+            )
+        };
         if result.representation_changed {
             self.invalidate_provider_context("automatic provider context view changed");
         }
         crate::logging::event_debug(
             "CONTEXT_AUTOMATIC_VIEW",
             vec![
+                ("mode".to_string(), result.mode.to_string()),
                 ("reason".to_string(), result.reason.clone()),
                 (
                     "source_version".to_string(),
