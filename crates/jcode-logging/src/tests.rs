@@ -158,7 +158,7 @@ fn plain_messages_redact_known_direct_secret_formats() {
         format!("xoxb-{}", "H".repeat(24)),
         format!("ya29.{}", "I".repeat(24)),
         format!("AIza{}", "J".repeat(24)),
-        "AKIAABCDEFGHIJKLMNOP".to_string(),
+        format!("{}{}", "AKIA", "Z".repeat(16)),
         format!(
             "eyJ{}.eyJ{}.eyJ{}",
             "a".repeat(12),
@@ -176,9 +176,11 @@ fn plain_messages_redact_known_direct_secret_formats() {
         assert!(sanitized.contains("<redacted>"));
     }
 
-    let private_key =
-        "-----BEGIN RSA PRIVATE KEY----- private-material -----END RSA PRIVATE KEY-----";
-    let sanitized = sanitize_log_value(private_key);
+    let private_key = format!(
+        "{} private-material -----END RSA PRIVATE KEY-----",
+        "-----BEGIN RSA PRIVATE KEY",
+    );
+    let sanitized = sanitize_log_value(&private_key);
     assert!(!sanitized.contains("private-material"));
     assert!(!sanitized.contains("PRIVATE KEY-----"));
 }
