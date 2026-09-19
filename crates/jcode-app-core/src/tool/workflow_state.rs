@@ -100,6 +100,8 @@ enum ObservationDisposition {
     Contradicted,
 }
 
+// Keep the error branch explicit so malformed revisions are handled visibly.
+#[allow(clippy::manual_ok_err)]
 fn trailing_revision_number(value: &str) -> Option<u64> {
     let start = value
         .char_indices()
