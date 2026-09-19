@@ -19,6 +19,7 @@ mod turn_execution;
 mod turn_loops;
 mod turn_streaming_mpsc;
 mod utils;
+mod workflow_context;
 
 use self::context_telemetry::{
     log_agent_provider_stream_lifecycle, log_request, record_and_log_usage,
@@ -218,7 +219,7 @@ pub struct Agent {
     /// AGENTS, skills and tools hashes seen at the last preflight.
     last_provider_components_fingerprint: Option<String>,
     /// Стабильное автоматическое представление старой истории для провайдера.
-    provider_context_view: provider_context_view::ProviderContextViewState,
+    provider_context_view: provider_context_view::WorkflowContextProjector,
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
     /// Момент последней мутации транскрипта (rewind, prune, compact).
@@ -309,7 +310,7 @@ impl Agent {
             agents_md_snapshot,
             last_provider_static_prompt_hash: None,
             last_provider_components_fingerprint: None,
-            provider_context_view: provider_context_view::ProviderContextViewState::default(),
+            provider_context_view: provider_context_view::WorkflowContextProjector::default(),
             memory_enabled: crate::config::config().features.memory,
             last_transcript_mutation_at: None,
             stdin_request_tx: None,
@@ -807,18 +808,25 @@ impl Agent {
         tools: &[ToolDefinition],
     ) -> Vec<Message> {
         let tool_definition_tokens = ToolDefinition::aggregate_prompt_token_estimate(tools);
-        let result = self.provider_context_view.project(
-            messages,
-            self.provider.context_window(),
-            split_prompt.estimated_tokens(),
-            tool_definition_tokens,
-        );
+        let workflow_context_mode = self.should_use_workflow_context_view();
+        let result = if workflow_context_mode {
+            self.provider_context_view
+                .project_workflow_context(messages)
+        } else {
+            self.provider_context_view.project(
+                messages,
+                self.provider.context_window(),
+                split_prompt.estimated_tokens(),
+                tool_definition_tokens,
+            )
+        };
         if result.representation_changed {
             self.invalidate_provider_context("automatic provider context view changed");
         }
         crate::logging::event_debug(
             "CONTEXT_AUTOMATIC_VIEW",
             vec![
+                ("mode".to_string(), result.mode.to_string()),
                 ("reason".to_string(), result.reason.clone()),
                 (
                     "source_version".to_string(),
@@ -1175,6 +1183,9 @@ mod rewind_pairing_tests;
 
 #[cfg(test)]
 mod context_control_benchmark_tests;
+
+#[cfg(test)]
+mod workflow_context_mode_tests;
 
 #[cfg(test)]
 #[path = "agent_tests.rs"]

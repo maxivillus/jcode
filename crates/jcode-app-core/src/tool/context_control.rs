@@ -1,4 +1,4 @@
-use super::{Tool, ToolContext, ToolOutput, skill_state};
+use super::{Tool, ToolContext, ToolOutput, workflow_state};
 use crate::context::{ContextPlane, ContextRevision};
 use crate::context_controller::{
     ContextActionKind, ContextController, ContextPruneForecast, ContextPruneKind,
@@ -42,8 +42,10 @@ impl ContextTools {
             Arc::new(ContextControlTool::new(self.bindings.clone())),
         );
         tools.insert(
-            "skill_state".into(),
-            Arc::new(skill_state::SkillStateTool::new(self.bindings.clone())),
+            "workflow_state".into(),
+            Arc::new(workflow_state::WorkflowStateTool::new(
+                self.bindings.clone(),
+            )),
         );
     }
 

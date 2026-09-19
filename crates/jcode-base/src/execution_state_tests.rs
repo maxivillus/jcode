@@ -44,6 +44,89 @@ fn prompt_summary_clips_long_utf8_values_without_breaking_boundaries() {
 }
 
 #[test]
+fn prompt_summary_uses_latest_source_revision_after_observation_patch() {
+    let mut state = ExecutionState::new("sample-workflow").unwrap();
+    let mut first_observation = ExecutionStatePatch::new("sample-workflow", state.revision);
+    first_observation.source_revision = Some(PatchValue::Set("source:v1".to_string()));
+    state.apply_patch(&first_observation).unwrap();
+
+    assert!(
+        state
+            .prompt_summary()
+            .contains("source_revision: source:v1")
+    );
+
+    let mut refreshed_observation = ExecutionStatePatch::new("sample-workflow", state.revision);
+    refreshed_observation.source_revision = Some(PatchValue::Set("source:v2".to_string()));
+    state.apply_patch(&refreshed_observation).unwrap();
+
+    let summary = state.prompt_summary();
+    assert!(summary.contains("source_revision: source:v2"));
+    assert!(!summary.contains("source:v1"));
+}
+
+#[test]
+fn prompt_summary_replaces_old_observation_and_redacts_stale_value() {
+    let mut state = ExecutionState::new("sample-workflow").unwrap();
+    let mut first = ExecutionStatePatch::new("sample-workflow", state.revision);
+    first.source_revision = Some(PatchValue::Set("source:v1".to_string()));
+    first.last_observation = Some(PatchValue::Set("value: old".to_string()));
+    first.observation_source = Some(PatchValue::Set("source".to_string()));
+    first.last_observation_revision = Some(PatchValue::Set("source:v1".to_string()));
+    first.observation_status = Some(PatchValue::Set(OBSERVATION_STATUS_CURRENT.to_string()));
+    first.observed_at = Some(PatchValue::Set("2026-09-18T00:00:00Z".to_string()));
+    state.apply_patch(&first).unwrap();
+
+    let current = state.prompt_summary();
+    assert!(current.contains("value: old"));
+    assert!(current.contains("observation_status: current"));
+
+    let mut refreshed = ExecutionStatePatch::new("sample-workflow", state.revision);
+    refreshed.source_revision = Some(PatchValue::Set("source:v2".to_string()));
+    refreshed.last_observation = Some(PatchValue::Set("value: new".to_string()));
+    refreshed.last_observation_revision = Some(PatchValue::Set("source:v2".to_string()));
+    refreshed.observation_status = Some(PatchValue::Set(OBSERVATION_STATUS_CURRENT.to_string()));
+    refreshed.observed_at = Some(PatchValue::Set("2026-09-18T00:01:00Z".to_string()));
+    state.apply_patch(&refreshed).unwrap();
+
+    let refreshed_summary = state.prompt_summary();
+    assert!(refreshed_summary.contains("value: new"));
+    assert!(!refreshed_summary.contains("value: old"));
+
+    let mut stale = ExecutionStatePatch::new("sample-workflow", state.revision);
+    stale.last_observation = Some(PatchValue::Set("value: stale".to_string()));
+    stale.last_observation_revision = Some(PatchValue::Set("source:v1".to_string()));
+    stale.observation_status = Some(PatchValue::Set(OBSERVATION_STATUS_STALE.to_string()));
+    state.apply_patch(&stale).unwrap();
+
+    let stale_summary = state.prompt_summary();
+    assert!(stale_summary.contains("observation_status: stale"));
+    assert!(stale_summary.contains("value omitted because observation is not current"));
+    assert!(!stale_summary.contains("value: stale"));
+}
+
+#[test]
+fn prompt_summary_omits_summary_when_source_revision_changes() {
+    let mut state = ExecutionState::new("sample-workflow").unwrap();
+    let mut initial = ExecutionStatePatch::new("sample-workflow", state.revision);
+    initial.source_revision = Some(PatchValue::Set("source:v1".to_string()));
+    initial.context_summary = Some(PatchValue::Set("old summary value".to_string()));
+    initial.summary_source_revision = Some(PatchValue::Set("source:v1".to_string()));
+    state.apply_patch(&initial).unwrap();
+
+    let current = state.prompt_summary();
+    assert!(current.contains("old summary value"));
+
+    let mut changed = ExecutionStatePatch::new("sample-workflow", state.revision);
+    changed.source_revision = Some(PatchValue::Set("source:v2".to_string()));
+    state.apply_patch(&changed).unwrap();
+
+    let stale = state.prompt_summary();
+    assert!(stale.contains("summary revision is stale or unknown"));
+    assert!(!stale.contains("old summary value"));
+}
+
+#[test]
 fn contract_serializes_all_machine_readable_fields() {
     let state = ExecutionState::new("code-review").unwrap();
     let encoded = serde_json::to_value(state.contract()).unwrap();
@@ -74,7 +157,8 @@ fn contract_serializes_all_machine_readable_fields() {
             "propose_patch",
             "record_observation",
             "retrieve_evidence",
-            "reconcile"
+            "reconcile",
+            "commit_round"
         ])
     );
 }

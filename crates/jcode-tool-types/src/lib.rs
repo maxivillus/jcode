@@ -92,6 +92,9 @@ pub fn resolve_tool_name(name: &str) -> &str {
         // work as-is.
         "grep" | "file_grep" => "agentgrep",
         "skill" | "Skill" => "skill_manage",
+        // Keep older model calls working after the bounded state tool moved to
+        // the workflow vocabulary.
+        "skill_state" => "workflow_state",
         // The integration catalog tool was renamed from `discover_tools`;
         // models trained on or resuming from the old vocabulary still emit it.
         "discover_tools" => "integration_tools",
@@ -143,5 +146,12 @@ mod tests {
         assert_eq!(resolve_tool_name("ScheduleWakeup"), "schedule");
         assert_eq!(resolve_tool_name("Skill"), "skill_manage");
         assert_eq!(resolve_tool_name("functions.Read"), "read");
+    }
+
+    #[test]
+    fn resolve_tool_name_maps_legacy_skill_state_to_workflow_state() {
+        assert_eq!(resolve_tool_name("skill_state"), "workflow_state");
+        assert_eq!(resolve_tool_name("functions.skill_state"), "workflow_state");
+        assert_eq!(resolve_tool_name("workflow_state"), "workflow_state");
     }
 }

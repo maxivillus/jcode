@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::provider_context_view::WorkflowContextProjector;
 use crate::context_controller::{ContextActionOutcome, ContextPruneKind, ContextPruneSpec};
 use crate::message::{CacheControl, ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
@@ -10,6 +11,8 @@ use std::sync::{Arc, Mutex};
 const BENCHMARK_ITERATIONS: usize = 3;
 const SYSTEM_STATIC: &str = "You are a deterministic context-control benchmark provider.";
 const SYSTEM_DYNAMIC: &str = "Keep the retained image and the latest tool result unchanged.";
+const STATE_FIRST_DYNAMIC: &str =
+    "Keep the bounded workflow state and latest observation unchanged.";
 
 #[derive(Clone, Debug)]
 struct ProviderRequestMetrics {
@@ -174,13 +177,14 @@ async fn measure_request(
     provider: &CountingProvider,
     messages: &[Message],
     tools: &[ToolDefinition],
+    dynamic_system: &str,
 ) -> ProviderRequestMetrics {
     let mut events = provider
         .complete_split(
             messages,
             tools,
             SYSTEM_STATIC,
-            SYSTEM_DYNAMIC,
+            dynamic_system,
             Some("controlled-benchmark-session"),
         )
         .await
@@ -264,8 +268,10 @@ async fn controlled_provider_benchmark_reports_paired_proxy_metrics() {
     let mut baseline_runs = Vec::with_capacity(BENCHMARK_ITERATIONS);
     let mut candidate_runs = Vec::with_capacity(BENCHMARK_ITERATIONS);
     for _ in 0..BENCHMARK_ITERATIONS {
-        baseline_runs.push(measure_request(&provider, &baseline_messages, &tools).await);
-        candidate_runs.push(measure_request(&provider, &candidate_messages, &tools).await);
+        baseline_runs
+            .push(measure_request(&provider, &baseline_messages, &tools, SYSTEM_DYNAMIC).await);
+        candidate_runs
+            .push(measure_request(&provider, &candidate_messages, &tools, SYSTEM_DYNAMIC).await);
     }
 
     for (baseline, candidate) in baseline_runs.iter().zip(&candidate_runs) {
@@ -312,5 +318,112 @@ async fn controlled_provider_benchmark_reports_paired_proxy_metrics() {
     println!(
         "CONTROLLED_PROVIDER_BENCHMARK {}",
         serde_json::to_string(&payload).expect("benchmark aggregate must serialize")
+    );
+}
+
+fn metric_json(mode: &str, horizon: usize, metrics: &ProviderRequestMetrics) -> serde_json::Value {
+    serde_json::json!({
+        "mode": mode,
+        "horizon": horizon,
+        "message_count": metrics.message_count,
+        "tool_count": metrics.tool_count,
+        "image_count": metrics.image_count,
+        "cache_control_count": metrics.cache_control_count,
+        "tool_result_chars": metrics.tool_result_chars,
+        "system_chars": metrics.system_chars,
+        "serialized_request_bytes": metrics.serialized_request_bytes,
+        "proxy_input_tokens": metrics.proxy_input_tokens,
+        "resume_session_present": metrics.resume_session_present,
+    })
+}
+
+async fn matched_fixture_messages(horizon: usize) -> Vec<Message> {
+    let provider: Arc<dyn Provider> = Arc::new(CountingProvider::default());
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    for index in 0..horizon {
+        add_fixture_turn(&mut agent, index, index + 1 == horizon);
+    }
+    agent.session.messages_for_provider_uncached()
+}
+
+#[tokio::test]
+async fn matched_context_view_benchmark_reports_three_modes_and_horizons() {
+    let _guard = crate::storage::lock_test_env();
+    let provider = CountingProvider::default();
+    let tools = fixture_tools();
+    let horizons = [10usize, 50, 100, 200];
+    let mut records = Vec::new();
+
+    for horizon in horizons {
+        let messages = matched_fixture_messages(horizon).await;
+        let transcript = messages.clone();
+
+        let mut bounded_projector = WorkflowContextProjector::default();
+        let bounded = bounded_projector.project(&messages, 20_000, 0, 0).messages;
+
+        let mut state_first_projector = WorkflowContextProjector::default();
+        let state_first = state_first_projector
+            .project_workflow_context(&messages)
+            .messages;
+
+        let transcript_metrics =
+            measure_request(&provider, &transcript, &tools, SYSTEM_DYNAMIC).await;
+        let bounded_metrics = measure_request(&provider, &bounded, &tools, SYSTEM_DYNAMIC).await;
+        let state_first_metrics =
+            measure_request(&provider, &state_first, &tools, STATE_FIRST_DYNAMIC).await;
+
+        assert_eq!(
+            transcript_metrics.tool_count, bounded_metrics.tool_count,
+            "tools must remain paired at horizon {horizon}"
+        );
+        assert_eq!(
+            transcript_metrics.tool_count, state_first_metrics.tool_count,
+            "tools must remain paired at horizon {horizon}"
+        );
+        assert_eq!(
+            transcript_metrics.image_count, bounded_metrics.image_count,
+            "images must remain paired at horizon {horizon}"
+        );
+        assert_eq!(
+            transcript_metrics.image_count, state_first_metrics.image_count,
+            "images must remain paired at horizon {horizon}"
+        );
+        assert!(
+            state_first_metrics.serialized_request_bytes
+                < transcript_metrics.serialized_request_bytes,
+            "state-first must reduce the request at horizon {horizon}"
+        );
+        if horizon >= 50 {
+            assert!(
+                bounded_metrics.serialized_request_bytes
+                    < transcript_metrics.serialized_request_bytes,
+                "bounded projection must reduce the long request at horizon {horizon}"
+            );
+        }
+
+        records.push(metric_json("transcript", horizon, &transcript_metrics));
+        records.push(metric_json("bounded_projection", horizon, &bounded_metrics));
+        records.push(metric_json("state_first", horizon, &state_first_metrics));
+    }
+
+    let payload = serde_json::json!({
+        "benchmark": "matched_context_view_modes",
+        "provider": "controlled-benchmark-provider",
+        "model": "controlled-benchmark-model",
+        "horizons": horizons,
+        "conditions": {
+            "same_fixture": true,
+            "same_tools": true,
+            "same_image_position": true,
+            "same_resume_session_presence": true,
+            "proxy_only": true,
+        },
+        "records": records,
+        "interpretation": "Synthetic deterministic provider proxy only; this is not evidence of real provider-token or cost savings.",
+    });
+    println!(
+        "MATCHED_CONTEXT_VIEW_BENCHMARK {}",
+        serde_json::to_string(&payload).expect("matched benchmark aggregate must serialize")
     );
 }
