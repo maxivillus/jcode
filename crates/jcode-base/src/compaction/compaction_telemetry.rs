@@ -6,7 +6,7 @@ fn optional_metric<T: ToString>(value: Option<T>) -> String {
         .unwrap_or_else(|| "none".to_string())
 }
 
-pub(super) fn event(mode: &str, event: Option<&CompactionEvent>) {
+pub(super) fn event(mode: &str, retention: &str, event: Option<&CompactionEvent>) {
     let Some(event) = event else {
         return;
     };
@@ -14,6 +14,7 @@ pub(super) fn event(mode: &str, event: Option<&CompactionEvent>) {
         "CONTEXT_COMPACTION_APPLIED",
         vec![
             ("mode".to_string(), mode.to_string()),
+            ("retention".to_string(), retention.to_string()),
             (
                 "trigger".to_string(),
                 crate::logging::truncate_for_log(&event.trigger, 80),

@@ -1,3 +1,4 @@
+use crate::config::ContextRetention;
 use crate::message::{
     ContentBlock, Message, Role, cache_relevant_message_hashes, extend_stable_hash,
 };
@@ -24,6 +25,53 @@ const TOOL_RESULT_OMITTED_NOTE: &str =
 const MEMORY_OMITTED_NOTE: &str =
     "[older memory injection omitted automatically; canonical session retains it]";
 
+#[derive(Debug, Clone, Copy)]
+struct RetentionSettings {
+    trigger_numerator: usize,
+    trigger_denominator: usize,
+    recent_turn_groups: usize,
+    max_turn_groups_before_projection: usize,
+    max_projected_turn_groups_before_rebuild: usize,
+    workflow_tail_groups: usize,
+}
+
+fn retention_settings(retention: ContextRetention) -> RetentionSettings {
+    match retention {
+        ContextRetention::High => RetentionSettings {
+            trigger_numerator: 9,
+            trigger_denominator: 10,
+            recent_turn_groups: 16,
+            max_turn_groups_before_projection: 48,
+            max_projected_turn_groups_before_rebuild: 32,
+            workflow_tail_groups: 16,
+        },
+        ContextRetention::Mid => RetentionSettings {
+            trigger_numerator: 4,
+            trigger_denominator: 5,
+            recent_turn_groups: 12,
+            max_turn_groups_before_projection: 32,
+            max_projected_turn_groups_before_rebuild: 24,
+            workflow_tail_groups: 8,
+        },
+        ContextRetention::Low => RetentionSettings {
+            trigger_numerator: AUTOMATIC_TRIGGER_NUMERATOR,
+            trigger_denominator: AUTOMATIC_TRIGGER_DENOMINATOR,
+            recent_turn_groups: RECENT_TURN_GROUPS,
+            max_turn_groups_before_projection: MAX_TURN_GROUPS_BEFORE_PROJECTION,
+            max_projected_turn_groups_before_rebuild: MAX_PROJECTED_TURN_GROUPS_BEFORE_REBUILD,
+            workflow_tail_groups: 1,
+        },
+        ContextRetention::Disabled => RetentionSettings {
+            trigger_numerator: 1,
+            trigger_denominator: 1,
+            recent_turn_groups: usize::MAX,
+            max_turn_groups_before_projection: usize::MAX,
+            max_projected_turn_groups_before_rebuild: usize::MAX,
+            workflow_tail_groups: usize::MAX,
+        },
+    }
+}
+
 type RenderedProjection = (Vec<Message>, usize, usize, usize);
 
 #[derive(Debug, Clone, Copy)]
@@ -35,6 +83,7 @@ struct Boundary {
 #[derive(Debug, Clone, Copy)]
 struct ViewFingerprint {
     mode: &'static str,
+    retention: ContextRetention,
     message_count: usize,
     prefix_hash: u64,
 }
@@ -49,6 +98,7 @@ pub struct WorkflowContextProjector {
 pub struct WorkflowContextView {
     pub messages: Vec<Message>,
     pub mode: &'static str,
+    pub retention: ContextRetention,
     pub representation_changed: bool,
     pub active: bool,
     pub source_version: u64,
@@ -77,6 +127,34 @@ impl WorkflowContextProjector {
         system_prompt_tokens: usize,
         tool_definition_tokens: usize,
     ) -> WorkflowContextView {
+        self.project_with_retention(
+            messages,
+            provider_context_limit,
+            system_prompt_tokens,
+            tool_definition_tokens,
+            ContextRetention::Low,
+        )
+    }
+
+    pub fn project_with_retention(
+        &mut self,
+        messages: &[Message],
+        provider_context_limit: usize,
+        system_prompt_tokens: usize,
+        tool_definition_tokens: usize,
+        retention: ContextRetention,
+    ) -> WorkflowContextView {
+        if retention == ContextRetention::Disabled {
+            return self.unmodified_view(
+                messages,
+                retention,
+                "disabled",
+                false,
+                "retention_disabled",
+            );
+        }
+
+        let settings = retention_settings(retention);
         let before_tokens = message_token_estimate(messages);
         let before_turn_groups = turn_group_ranges(messages).len();
         let source_prefix_hashes = rolling_prefix_hashes(messages);
@@ -88,8 +166,8 @@ impl WorkflowContextProjector {
             .saturating_sub(SAFETY_MARGIN_TOKENS);
         let trigger_tokens = budget_fraction(
             usable_budget,
-            AUTOMATIC_TRIGGER_NUMERATOR,
-            AUTOMATIC_TRIGGER_DENOMINATOR,
+            settings.trigger_numerator,
+            settings.trigger_denominator,
         );
         let rebuild_tokens = budget_fraction(
             usable_budget,
@@ -97,7 +175,14 @@ impl WorkflowContextProjector {
             AUTOMATIC_REBUILD_DENOMINATOR,
         );
         let pressure = before_tokens >= trigger_tokens
-            || before_turn_groups > MAX_TURN_GROUPS_BEFORE_PROJECTION;
+            || before_turn_groups > settings.max_turn_groups_before_projection;
+
+        if self
+            .last_view
+            .is_some_and(|previous| previous.retention != retention)
+        {
+            self.stable_boundary = None;
+        }
 
         let mut reason = "not_needed".to_string();
         let mut cutoff = self
@@ -110,7 +195,7 @@ impl WorkflowContextProjector {
             let projected_turn_groups = turn_group_ranges(&existing_rendered.0).len();
             let needs_rebuild = existing_rendered.0.len() > messages.len()
                 || message_token_estimate(&existing_rendered.0) > rebuild_tokens
-                || projected_turn_groups > MAX_PROJECTED_TURN_GROUPS_BEFORE_REBUILD;
+                || projected_turn_groups > settings.max_projected_turn_groups_before_rebuild;
             if needs_rebuild {
                 cutoff = None;
                 rendered = None;
@@ -121,9 +206,12 @@ impl WorkflowContextProjector {
         }
 
         if cutoff.is_none() && pressure {
-            if let Some((selected_cutoff, selected_rendered)) =
-                choose_projection(messages, trigger_tokens, &source_prefix_hashes)
-            {
+            if let Some((selected_cutoff, selected_rendered)) = choose_projection(
+                messages,
+                trigger_tokens,
+                &source_prefix_hashes,
+                settings.recent_turn_groups,
+            ) {
                 cutoff = Some(selected_cutoff);
                 rendered = Some(selected_rendered);
                 reason = "automatic_tail_and_turns".to_string();
@@ -150,6 +238,7 @@ impl WorkflowContextProjector {
         };
         let representation_changed = self.last_view.is_some_and(|previous| {
             previous.mode != "transcript"
+                || previous.retention != retention
                 || previous.message_count > view_prefix_hashes.len()
                 || view_prefix_hashes
                     .get(previous.message_count.saturating_sub(1))
@@ -172,6 +261,7 @@ impl WorkflowContextProjector {
         }
         self.last_view = Some(ViewFingerprint {
             mode: "transcript",
+            retention,
             message_count: view_prefix_hashes.len(),
             prefix_hash: view_version,
         });
@@ -179,6 +269,7 @@ impl WorkflowContextProjector {
         WorkflowContextView {
             messages: output,
             mode: "transcript",
+            retention,
             representation_changed,
             active: cutoff.is_some(),
             source_version,
@@ -195,24 +286,99 @@ impl WorkflowContextProjector {
         }
     }
 
-    /// Projects an active workflow to the latest turn only.
+    fn unmodified_view(
+        &mut self,
+        messages: &[Message],
+        retention: ContextRetention,
+        mode: &'static str,
+        active: bool,
+        reason: &str,
+    ) -> WorkflowContextView {
+        let source_prefix_hashes = rolling_prefix_hashes(messages);
+        let source_version = source_prefix_hashes.last().copied().unwrap_or(0);
+        let view_version = source_version;
+        let representation_changed = self.last_view.is_some_and(|previous| {
+            previous.mode != mode
+                || previous.retention != retention
+                || previous.message_count > messages.len()
+                || (previous.message_count > 0
+                    && source_prefix_hashes
+                        .get(previous.message_count.saturating_sub(1))
+                        .copied()
+                        .unwrap_or(0)
+                        != previous.prefix_hash)
+        });
+        self.stable_boundary = None;
+        self.last_view = Some(ViewFingerprint {
+            mode,
+            retention,
+            message_count: messages.len(),
+            prefix_hash: view_version,
+        });
+        WorkflowContextView {
+            messages: messages.to_vec(),
+            mode,
+            retention,
+            representation_changed,
+            active,
+            source_version,
+            view_version,
+            before_tokens: message_token_estimate(messages),
+            after_tokens: message_token_estimate(messages),
+            before_turn_groups: turn_group_ranges(messages).len(),
+            after_turn_groups: turn_group_ranges(messages).len(),
+            excluded_messages: 0,
+            excluded_turn_groups: 0,
+            summary_messages: 0,
+            summary_source_version: None,
+            reason: reason.to_string(),
+        }
+    }
+
+    /// Projects an active workflow to a bounded recent tail.
     ///
     /// The immutable workflow specification and bounded `WorkflowRunState` are
     /// carried by the split system prompt. The message view keeps only the
     /// current request and its tool observations, while the canonical session
     /// remains unchanged for audit and recovery.
     pub fn project_workflow_context(&mut self, messages: &[Message]) -> WorkflowContextView {
+        self.project_workflow_context_with_retention(messages, ContextRetention::Low)
+    }
+
+    pub fn project_workflow_context_with_retention(
+        &mut self,
+        messages: &[Message],
+        retention: ContextRetention,
+    ) -> WorkflowContextView {
+        if retention == ContextRetention::Disabled {
+            return self.unmodified_view(
+                messages,
+                retention,
+                "disabled",
+                false,
+                "retention_disabled",
+            );
+        }
+
+        let settings = retention_settings(retention);
         let before_tokens = message_token_estimate(messages);
         let before_turn_groups = turn_group_ranges(messages).len();
         let source_version = rolling_prefix_hashes(messages).last().copied().unwrap_or(0);
         let ranges = turn_group_ranges(messages);
+        let first_kept_group = ranges
+            .len()
+            .saturating_sub(settings.workflow_tail_groups.min(ranges.len()));
         let latest_start = ranges
-            .last()
+            .get(first_kept_group)
             .map(|(start, _)| balanced_suffix_start(messages, *start));
         let (output, reason) = match latest_start {
             Some(start) if start < messages.len() => (
                 messages[start..].to_vec(),
-                "state_first_latest_turn".to_string(),
+                if settings.workflow_tail_groups == 1 {
+                    "state_first_latest_turn".to_string()
+                } else {
+                    "state_first_recent_tail".to_string()
+                },
             ),
             _ => (
                 messages.to_vec(),
@@ -227,6 +393,7 @@ impl WorkflowContextProjector {
         let excluded_turn_groups = before_turn_groups.saturating_sub(after_turn_groups);
         let representation_changed = self.last_view.is_some_and(|previous| {
             previous.mode != "state_first"
+                || previous.retention != retention
                 || previous.message_count > view_prefix_hashes.len()
                 || view_prefix_hashes
                     .get(previous.message_count.saturating_sub(1))
@@ -238,6 +405,7 @@ impl WorkflowContextProjector {
         self.stable_boundary = None;
         self.last_view = Some(ViewFingerprint {
             mode: "state_first",
+            retention,
             message_count: view_prefix_hashes.len(),
             prefix_hash: view_version,
         });
@@ -245,6 +413,7 @@ impl WorkflowContextProjector {
         WorkflowContextView {
             messages: output,
             mode: "state_first",
+            retention,
             representation_changed,
             active: true,
             source_version,
@@ -306,13 +475,14 @@ fn choose_projection(
     messages: &[Message],
     target_tokens: usize,
     source_prefix_hashes: &[u64],
+    recent_turn_groups: usize,
 ) -> Option<(usize, RenderedProjection)> {
     let ranges = turn_group_ranges(messages);
-    if ranges.len() <= RECENT_TURN_GROUPS {
+    if ranges.len() <= recent_turn_groups {
         return None;
     }
 
-    let maximum_recent = RECENT_TURN_GROUPS.min(ranges.len().saturating_sub(1));
+    let maximum_recent = recent_turn_groups.min(ranges.len().saturating_sub(1));
     for recent_groups in (1..=maximum_recent).rev() {
         let group_index = ranges.len().saturating_sub(recent_groups);
         let candidate = balanced_suffix_start(messages, ranges[group_index].0);
@@ -809,6 +979,59 @@ mod tests {
         assert!(text_contains(&result.messages, "updated value: source:v2"));
         assert!(!text_contains(&result.messages, "old value: source:v1"));
         assert_eq!(first_gap(&result.messages), None);
+    }
+
+    #[test]
+    fn workflow_retention_policy_controls_recent_tail() {
+        let messages = groups(20);
+        let cases = [
+            (ContextRetention::High, 16),
+            (ContextRetention::Mid, 8),
+            (ContextRetention::Low, 1),
+        ];
+
+        for (retention, expected_groups) in cases {
+            let mut state = WorkflowContextProjector::default();
+            let result = state.project_workflow_context_with_retention(&messages, retention);
+
+            assert_eq!(result.retention, retention);
+            assert_eq!(result.mode, "state_first");
+            assert_eq!(result.after_turn_groups, expected_groups);
+            assert_eq!(result.excluded_turn_groups, 20 - expected_groups);
+        }
+    }
+
+    #[test]
+    fn disabled_retention_preserves_the_full_provider_view() {
+        let messages = groups(20);
+        let mut state = WorkflowContextProjector::default();
+        let result =
+            state.project_workflow_context_with_retention(&messages, ContextRetention::Disabled);
+
+        assert_eq!(result.retention, ContextRetention::Disabled);
+        assert_eq!(result.mode, "disabled");
+        assert!(!result.active);
+        assert_eq!(
+            serde_json::to_string(&result.messages).unwrap(),
+            serde_json::to_string(&messages).unwrap()
+        );
+        assert_eq!(result.excluded_messages, 0);
+        assert_eq!(result.excluded_turn_groups, 0);
+    }
+
+    #[test]
+    fn disabled_retention_bypasses_transcript_projection() {
+        let messages = groups(50);
+        let mut state = WorkflowContextProjector::default();
+        let result =
+            state.project_with_retention(&messages, 1_000, 0, 0, ContextRetention::Disabled);
+
+        assert_eq!(
+            serde_json::to_string(&result.messages).unwrap(),
+            serde_json::to_string(&messages).unwrap()
+        );
+        assert_eq!(result.mode, "disabled");
+        assert_eq!(result.reason, "retention_disabled");
     }
 
     #[test]

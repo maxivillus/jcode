@@ -73,11 +73,12 @@ Control characters в обычных сообщениях заменяются �
 Runtime записывает агрегированные события управления контекстом через тот же JSONL logger:
 
 - `CONTEXT_PREFLIGHT` и `CONTEXT_METRICS`: revision, оценки input tokens, размеры system prompt, tools, messages и images, лимиты и выбранное действие;
+- `CONTEXT_AUTOMATIC_VIEW`: выбранный `retention`, режим provider view, размеры до и после, исключённые messages/turn groups и source/view revisions;
 - `CONTEXT_PROVIDER_REQUEST` и `CONTEXT_PROVIDER_USAGE`: режим запроса, revision, оценки, фактические input/output tokens и cache usage;
 - `CONTEXT_PROVIDER_REQUEST_REJECTED` и `CONTEXT_PROVIDER_RESPONSE_REJECTED`: причина отказа и несовпавшие revision;
 - `CONTEXT_PROVIDER_RESPONSE_ACCEPTED`: принятая revision и фактическая оценка input tokens, если provider её сообщил;
 - `CONTEXT_ACTION_RESULT`: действие, sequence, revision и итог `completed`, `skipped`, `failed` или `rejected`;
-- `CONTEXT_COMPACTION_APPLIED`: режим, размеры до и после, сэкономленные tokens, длительность и количество обработанных сообщений;
+- `CONTEXT_COMPACTION_APPLIED`: режим и `retention`, размеры до и после, сэкономленные tokens, длительность и количество обработанных сообщений;
 - `CONTEXT_PRUNE_APPLIED`, `CONTEXT_PRUNE_UNDO_APPLIED` и `CONTEXT_PRUNE`: вид операции, количество элементов, размеры до и после, revision и причина отката или пропуска;
 - `CONTEXT_COMPACTION_RECOVERY`, `CONTEXT_PAYLOAD_RECOVERY` и `CONTEXT_NATIVE_COMPACTION_RECOVERY`: безопасное восстановление после переполнения контекста или payload.
 

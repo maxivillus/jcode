@@ -1,4 +1,6 @@
+use super::retention;
 use super::*;
+use crate::config::ContextRetention;
 use crate::provider::{EventStream, Provider};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -118,6 +120,49 @@ fn test_should_compact() {
     }
 
     assert!(manager.should_compact_with(&messages));
+}
+
+#[test]
+fn retention_policy_maps_soft_thresholds_and_keep_counts() {
+    let mut manager = CompactionManager::new();
+
+    manager.compaction_config.retention = ContextRetention::High;
+    assert_eq!(retention::soft_compaction_threshold(&manager), 0.90);
+    assert_eq!(retention::soft_recent_turns_to_keep(&manager), 20);
+
+    manager.compaction_config.retention = ContextRetention::Mid;
+    assert_eq!(
+        retention::soft_compaction_threshold(&manager),
+        COMPACTION_THRESHOLD
+    );
+    assert_eq!(
+        retention::soft_recent_turns_to_keep(&manager),
+        RECENT_TURNS_TO_KEEP
+    );
+
+    manager.compaction_config.retention = ContextRetention::Low;
+    assert_eq!(retention::soft_compaction_threshold(&manager), 0.60);
+    assert_eq!(retention::soft_recent_turns_to_keep(&manager), 6);
+}
+
+#[test]
+fn disabled_retention_skips_soft_compaction_but_keeps_hard_recovery() {
+    let mut manager = CompactionManager::new().with_budget(100);
+    manager.compaction_config.retention = ContextRetention::Disabled;
+    let mut messages = Vec::new();
+    for index in 0..20 {
+        messages.push(make_text_message(
+            Role::User,
+            &format!("message {index} with enough content to exceed the emergency budget"),
+        ));
+        manager.notify_message_added();
+    }
+
+    assert!(!manager.should_compact_with(&messages));
+    assert!(matches!(
+        manager.ensure_context_fits(&messages, Arc::new(MockSummaryProvider)),
+        CompactionAction::HardCompacted(_)
+    ));
 }
 
 #[test]
