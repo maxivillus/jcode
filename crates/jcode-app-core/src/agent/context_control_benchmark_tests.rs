@@ -116,6 +116,58 @@ impl Provider for CountingProvider {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ProviderBoundaryObservation {
+    message_count: usize,
+    old_raw_marker_present: bool,
+    current_marker_present: bool,
+}
+
+#[derive(Clone, Default)]
+struct ProviderBoundaryProbe {
+    observations: Arc<Mutex<Vec<ProviderBoundaryObservation>>>,
+}
+
+#[async_trait]
+impl Provider for ProviderBoundaryProbe {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let encoded = serde_json::to_string(messages)
+            .expect("provider boundary messages must be serializable");
+        self.observations
+            .lock()
+            .expect("provider boundary observation lock")
+            .push(ProviderBoundaryObservation {
+                message_count: messages.len(),
+                old_raw_marker_present: encoded.contains("OLD_RAW_BOUNDARY_MARKER"),
+                current_marker_present: encoded.contains("CURRENT_BOUNDARY_MARKER"),
+            });
+        Ok(Box::pin(stream::iter([
+            Ok(StreamEvent::TextDelta("provider-boundary-ok".to_string())),
+            Ok(StreamEvent::MessageEnd {
+                stop_reason: Some("boundary_complete".to_string()),
+            }),
+        ])))
+    }
+
+    fn name(&self) -> &str {
+        "provider-boundary-probe"
+    }
+
+    fn model(&self) -> String {
+        "provider-boundary-probe-model".to_string()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
 fn add_fixture_turn(agent: &mut Agent, index: usize, include_image: bool) {
     let mut user_content = Vec::new();
     if include_image {
@@ -426,4 +478,54 @@ async fn matched_context_view_benchmark_reports_three_modes_and_horizons() {
         "MATCHED_CONTEXT_VIEW_BENCHMARK {}",
         serde_json::to_string(&payload).expect("matched benchmark aggregate must serialize")
     );
+}
+
+#[tokio::test]
+async fn state_first_view_reaches_provider_boundary_without_old_raw_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let provider = ProviderBoundaryProbe::default();
+    let provider_arc: Arc<dyn Provider> = Arc::new(provider.clone());
+    let registry = Registry::new(provider_arc.clone()).await;
+    let mut agent = Agent::new(provider_arc, registry);
+    agent.active_skill = Some("synthetic-workflow".to_string());
+
+    for index in 0..20 {
+        let user_text = if index == 0 {
+            format!("historical request {index}: OLD_RAW_BOUNDARY_MARKER")
+        } else {
+            format!("historical request {index}")
+        };
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: user_text,
+                cache_control: None,
+            }],
+        );
+        agent.add_message(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: format!("historical answer {index}"),
+                cache_control: None,
+            }],
+        );
+    }
+
+    let response = agent
+        .run_once_capture("CURRENT_BOUNDARY_MARKER")
+        .await
+        .expect("provider boundary probe turn must complete");
+    assert_eq!(response, "provider-boundary-ok");
+
+    let observations = provider
+        .observations
+        .lock()
+        .expect("provider boundary observation lock")
+        .clone();
+    assert_eq!(observations.len(), 1);
+    for observation in observations {
+        assert!(!observation.old_raw_marker_present);
+        assert!(observation.current_marker_present);
+        assert!(observation.message_count < agent.session.messages.len());
+    }
 }
