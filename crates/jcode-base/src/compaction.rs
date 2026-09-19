@@ -27,6 +27,7 @@ use std::time::Instant;
 use tokio::task::JoinHandle;
 
 mod compaction_telemetry;
+mod retention;
 pub use jcode_compaction_core::{
     CHARS_PER_TOKEN, COMPACTION_THRESHOLD, CRITICAL_THRESHOLD, CompactionAction, CompactionEvent,
     CompactionStats, DEFAULT_TOKEN_BUDGET, EMBED_MAX_CHARS_PER_MSG, EMBEDDING_HISTORY_WINDOW,
@@ -516,7 +517,7 @@ impl CompactionManager {
 
         let cfg = &self.compaction_config;
         let budget = self.token_budget as f64;
-        let threshold = COMPACTION_THRESHOLD as f64 * budget;
+        let threshold = retention::soft_compaction_threshold(self) as f64 * budget;
 
         // Compute EWMA of per-turn token deltas.
         // We need at least 2 snapshots to get a delta.
@@ -611,7 +612,9 @@ impl CompactionManager {
     fn semantic_cutoff(&mut self, active: &[Message]) -> usize {
         let goal_window_turns = self.compaction_config.goal_window_turns;
         let relevance_keep_threshold = self.compaction_config.relevance_keep_threshold;
-        let standard_cutoff = active.len().saturating_sub(RECENT_TURNS_TO_KEEP);
+        let standard_cutoff = active
+            .len()
+            .saturating_sub(retention::soft_recent_turns_to_keep(self));
         if standard_cutoff == 0 {
             return 0;
         }
@@ -741,9 +744,10 @@ impl CompactionManager {
         let grew = outcome.post_tokens > outcome.pre_tokens;
         let level = if grew { "warn" } else { "info" };
         let line = format!(
-            "[compaction/outcome] level={} trigger={} duration_ms={} pre_tokens={} post_tokens={} tokens_saved={} grew={} messages_len={} active_messages={} compacted_count={} total_turns={} messages_compacted={} messages_dropped={} summary_chars={} observed_input_tokens={:?}",
+            "[compaction/outcome] level={} trigger={} retention={} duration_ms={} pre_tokens={} post_tokens={} tokens_saved={} grew={} messages_len={} active_messages={} compacted_count={} total_turns={} messages_compacted={} messages_dropped={} summary_chars={} observed_input_tokens={:?}",
             level,
             outcome.trigger,
+            self.compaction_config.retention.as_str(),
             outcome.duration_ms,
             outcome.pre_tokens,
             outcome.post_tokens,
@@ -832,28 +836,6 @@ impl CompactionManager {
         self.effective_token_count() as f32 / self.token_budget as f32
     }
 
-    /// Check if we should start compaction
-    pub fn should_compact_with(&self, all_messages: &[Message]) -> bool {
-        use crate::config::CompactionMode;
-        if self.suppress_compaction_until_new_message {
-            return false;
-        }
-        let active = self.active_messages(all_messages);
-        match self.mode {
-            CompactionMode::Reactive => {
-                self.pending_task.is_none()
-                    && self.context_usage_with(all_messages) >= COMPACTION_THRESHOLD
-                    && active.len() > RECENT_TURNS_TO_KEEP
-            }
-            CompactionMode::Proactive => {
-                active.len() > RECENT_TURNS_TO_KEEP && self.should_compact_proactively(all_messages)
-            }
-            CompactionMode::Semantic => {
-                active.len() > RECENT_TURNS_TO_KEEP && self.should_compact_semantic(all_messages)
-            }
-        }
-    }
-
     /// Start background compaction if needed
     pub fn maybe_start_compaction_with(
         &mut self,
@@ -868,9 +850,10 @@ impl CompactionManager {
 
         // Calculate cutoff within active messages.
         // Semantic mode uses relevance scoring; other modes use recency.
+        let keep_turns = retention::soft_recent_turns_to_keep(self);
         let mut cutoff = match self.mode {
             crate::config::CompactionMode::Semantic => self.semantic_cutoff(active),
-            _ => active.len().saturating_sub(RECENT_TURNS_TO_KEEP),
+            _ => active.len().saturating_sub(keep_turns),
         };
         if cutoff == 0 {
             return;
@@ -1082,10 +1065,11 @@ impl CompactionManager {
 
         let active = self.active_messages(all_messages);
 
-        if active.len() <= RECENT_TURNS_TO_KEEP {
+        let keep_turns = retention::soft_recent_turns_to_keep(self);
+        if active.len() <= keep_turns {
             return Err(format!(
                 "Not enough messages to compact (need more than {}, have {})",
-                RECENT_TURNS_TO_KEEP,
+                keep_turns,
                 active.len()
             ));
         }
@@ -1097,7 +1081,7 @@ impl CompactionManager {
             ));
         }
 
-        let mut cutoff = active.len().saturating_sub(RECENT_TURNS_TO_KEEP);
+        let mut cutoff = active.len().saturating_sub(keep_turns);
         if cutoff == 0 {
             return Err("No messages available to compact after keeping recent turns".to_string());
         }
@@ -1228,7 +1212,7 @@ impl CompactionManager {
                         .map(|summary| summary.text.len()),
                     active_messages: Some(self.active_messages_count()),
                 });
-                compaction_telemetry::event("background", self.last_compaction.as_ref());
+                retention::emit_telemetry(self, "background");
                 crate::logging::info(&format!(
                     "[TIMING] compaction_complete: trigger={}, duration={}ms, pre_tokens={}, post_tokens={}, tokens_saved={}, messages_compacted={}, summary_chars={}, active_messages={}",
                     self.last_compaction
@@ -1547,7 +1531,7 @@ impl CompactionManager {
                 .map(|summary| summary.text.len()),
             active_messages: Some(self.active_messages_count()),
         });
-        compaction_telemetry::event("hard", self.last_compaction.as_ref());
+        retention::emit_telemetry(self, "hard");
         self.log_compaction_outcome(CompactionOutcomeLog {
             trigger: "hard_compact",
             pre_tokens,

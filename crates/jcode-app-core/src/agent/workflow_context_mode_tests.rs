@@ -59,10 +59,14 @@ async fn active_workflow_uses_state_first_projection_by_default() {
     let split_prompt = agent.build_system_prompt_split(None);
     let projected = agent.project_context(&messages, &split_prompt, &[]);
 
-    assert_eq!(projected.len(), 1);
+    assert_eq!(projected.len(), messages.len());
     assert_eq!(projected[0].role, Role::User);
     assert!(matches!(
         &projected[0].content[0],
+        ContentBlock::Text { text, .. } if text == "historical request one"
+    ));
+    assert!(matches!(
+        &projected[4].content[0],
         ContentBlock::Text { text, .. } if text == "current request"
     ));
 }
@@ -83,7 +87,7 @@ async fn fifty_turn_active_workflow_stays_bounded_without_context_control_calls(
 
         let projected = agent.project_context(&messages, &split_prompt, &[]);
         assert!(
-            projected.len() <= 2,
+            projected.len() <= 16,
             "turn {turn} projected too much history"
         );
 

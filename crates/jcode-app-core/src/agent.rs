@@ -808,16 +808,18 @@ impl Agent {
         tools: &[ToolDefinition],
     ) -> Vec<Message> {
         let tool_definition_tokens = ToolDefinition::aggregate_prompt_token_estimate(tools);
+        let retention = crate::config::config().compaction.retention;
         let workflow_context_mode = self.should_use_workflow_context_view();
         let result = if workflow_context_mode {
             self.provider_context_view
-                .project_workflow_context(messages)
+                .project_workflow_context_with_retention(messages, retention)
         } else {
-            self.provider_context_view.project(
+            self.provider_context_view.project_with_retention(
                 messages,
                 self.provider.context_window(),
                 split_prompt.estimated_tokens(),
                 tool_definition_tokens,
+                retention,
             )
         };
         if result.representation_changed {
@@ -827,6 +829,10 @@ impl Agent {
             "CONTEXT_AUTOMATIC_VIEW",
             vec![
                 ("mode".to_string(), result.mode.to_string()),
+                (
+                    "retention".to_string(),
+                    result.retention.as_str().to_string(),
+                ),
                 ("reason".to_string(), result.reason.clone()),
                 (
                     "source_version".to_string(),

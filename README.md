@@ -382,6 +382,22 @@ Useful environment overrides for these endpoints:
 
 For details on self-hosting, local runtimes, and the exact config file shape, see below.
 
+#### Context retention
+
+Automatic provider-view projection and soft compaction can be tuned in
+`~/.jcode/config.toml`:
+
+```toml
+[compaction]
+retention = "mid" # high, mid, low, or disabled
+```
+
+`mid` is the default balanced policy. `high` preserves a larger recent history
+tail. `low` favors smaller prompts and the most aggressive state-first view.
+`disabled` turns off soft automatic projection and compaction, but emergency
+recovery at the provider context limit remains enabled. The canonical session
+history is retained in every mode.
+
 #### Self-hosted OpenAI-compatible endpoints, including vLLM
 
 For agents and scripts, the preferred path is the one-shot provider profile command. It writes a named profile to `~/.jcode/config.toml`, stores secrets in jcode's private app config directory when requested, and prints exact run/validation commands:
