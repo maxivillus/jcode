@@ -43,6 +43,18 @@ fn weather_messages(step: usize) -> Vec<Message> {
     messages
 }
 
+fn weather_messages_through(step: usize) -> Vec<Message> {
+    let mut messages = weather_messages(step.min(3));
+    for current in 4..=step {
+        messages.push(user(&format!("Какая погода? Уточнение {current}")));
+        messages.push(assistant(&format!(
+            "Тепло. fact:day{current}=+{}",
+            20 + current
+        )));
+    }
+    messages
+}
+
 #[test]
 fn low_semantic_state_updates_each_step_and_compresses_at_n_three() {
     let mut projector = WorkflowContextProjector::default();
@@ -120,15 +132,76 @@ fn retention_modes_keep_the_planned_rebuild_intervals() {
         Some(3)
     );
     assert_eq!(
+        super::retention_settings(ContextRetention::Low).semantic_tail_groups,
+        1
+    );
+    assert_eq!(
         super::retention_settings(ContextRetention::Mid).semantic_rebuild_interval,
         Some(6)
+    );
+    assert_eq!(
+        super::retention_settings(ContextRetention::Mid).semantic_tail_groups,
+        2
     );
     assert_eq!(
         super::retention_settings(ContextRetention::High).semantic_rebuild_interval,
         Some(9)
     );
     assert_eq!(
+        super::retention_settings(ContextRetention::High).semantic_tail_groups,
+        4
+    );
+    assert_eq!(
         super::retention_settings(ContextRetention::Disabled).semantic_rebuild_interval,
         None
     );
+}
+
+#[test]
+fn mid_semantic_state_rebuilds_at_n_six_and_keeps_two_recent_turns() {
+    let mut projector = WorkflowContextProjector::default();
+    let result = projector.project_workflow_context_with_retention(
+        &weather_messages_through(6),
+        ContextRetention::Mid,
+    );
+
+    assert_eq!(result.reason, "state_first_semantic_mid_rebuild");
+    assert_eq!(result.after_turn_groups, 2);
+    assert!(result.semantic_compressed);
+    assert!(result.semantic_state_bytes < result.semantic_replaced_bytes);
+    assert!(text_contains(&result.messages, "current=warm"));
+    assert!(text_contains(&result.messages, "day6=+26"));
+}
+
+#[test]
+fn mid_semantic_state_applies_delta_between_rebuilds() {
+    let mut projector = WorkflowContextProjector::default();
+    let _ = projector.project_workflow_context_with_retention(
+        &weather_messages_through(6),
+        ContextRetention::Mid,
+    );
+    let result = projector.project_workflow_context_with_retention(
+        &weather_messages_through(7),
+        ContextRetention::Mid,
+    );
+
+    assert_eq!(result.reason, "state_first_semantic_mid_delta");
+    assert_eq!(result.after_turn_groups, 2);
+    assert!(text_contains(&result.messages, "day7=+27"));
+}
+
+#[test]
+fn high_semantic_state_rebuilds_at_n_nine_and_keeps_four_recent_turns() {
+    let mut projector = WorkflowContextProjector::default();
+    let result = projector.project_workflow_context_with_retention(
+        &weather_messages_through(9),
+        ContextRetention::High,
+    );
+
+    assert_eq!(result.reason, "state_first_semantic_high_rebuild");
+    assert_eq!(result.after_turn_groups, 4);
+    assert!(result.semantic_compressed);
+    assert!(result.semantic_state_bytes < result.semantic_replaced_bytes);
+    assert!(text_contains(&result.messages, "Amsterdam.today=+24"));
+    assert!(text_contains(&result.messages, "day9=+29"));
 }

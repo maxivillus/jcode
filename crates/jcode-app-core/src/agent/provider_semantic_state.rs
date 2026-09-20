@@ -61,10 +61,17 @@ impl BoundedSemanticState {
         source_prefix_hashes: &[u64],
         turn_groups: &[(usize, usize)],
         rebuild_interval: usize,
+        tail_groups: usize,
+        rebuild_reason: &'static str,
+        delta_reason: &'static str,
     ) -> Option<SemanticProjection> {
         let source_version = last_hash_or_zero(source_prefix_hashes);
-        let latest_start = turn_groups.last().map(|(start, _)| *start)?;
-        if latest_start == 0 || rebuild_interval == 0 {
+        let latest_turn_start = turn_groups.last().map(|(start, _)| *start)?;
+        let kept_tail_groups = tail_groups.min(turn_groups.len());
+        let tail_start = turn_groups
+            .get(turn_groups.len().saturating_sub(kept_tail_groups))
+            .map(|(start, _)| *start)?;
+        if latest_turn_start == 0 || tail_start == 0 || rebuild_interval == 0 {
             self.update_from_canonical_source(messages, source_prefix_hashes);
             return None;
         }
@@ -81,7 +88,7 @@ impl BoundedSemanticState {
         let delta_range = if full_rebuild {
             0..messages.len()
         } else {
-            latest_start..messages.len()
+            latest_turn_start..messages.len()
         };
         let delta = build_delta(messages, delta_range, source_version);
         if !delta.validate() {
@@ -104,7 +111,7 @@ impl BoundedSemanticState {
             Ok(bytes) => bytes.len(),
             Err(_) => return None,
         };
-        let replaced_bytes = match serde_json::to_vec(&messages[..latest_start]) {
+        let replaced_bytes = match serde_json::to_vec(&messages[..tail_start]) {
             Ok(bytes) => bytes.len(),
             Err(_) => return None,
         };
@@ -112,7 +119,7 @@ impl BoundedSemanticState {
             return None;
         }
 
-        let mut output = messages[latest_start..].to_vec();
+        let mut output = messages[tail_start..].to_vec();
         let user_index = output.iter().position(|message| {
             message.role == Role::User
                 && message.content.iter().any(|block| {
@@ -127,9 +134,9 @@ impl BoundedSemanticState {
         Some(SemanticProjection {
             messages: output,
             reason: if full_rebuild {
-                "state_first_semantic_low_rebuild"
+                rebuild_reason
             } else {
-                "state_first_semantic_low_delta"
+                delta_reason
             },
             source_version,
             state_bytes,

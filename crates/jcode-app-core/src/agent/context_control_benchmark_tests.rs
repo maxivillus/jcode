@@ -1,5 +1,7 @@
 use super::*;
-use crate::agent::provider_context_view::WorkflowContextProjector;
+use crate::agent::provider_context_view::{
+    BOUNDED_SEMANTIC_STATE_MARKER, WorkflowContextProjector,
+};
 use crate::context_controller::{ContextActionOutcome, ContextPruneKind, ContextPruneSpec};
 use crate::message::{CacheControl, ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
@@ -121,6 +123,7 @@ struct ProviderBoundaryObservation {
     message_count: usize,
     old_raw_marker_present: bool,
     current_marker_present: bool,
+    semantic_marker_present: bool,
 }
 
 #[derive(Clone, Default)]
@@ -146,6 +149,7 @@ impl Provider for ProviderBoundaryProbe {
                 message_count: messages.len(),
                 old_raw_marker_present: encoded.contains("OLD_RAW_BOUNDARY_MARKER"),
                 current_marker_present: encoded.contains("CURRENT_BOUNDARY_MARKER"),
+                semantic_marker_present: encoded.contains(BOUNDED_SEMANTIC_STATE_MARKER),
             });
         Ok(Box::pin(stream::iter([
             Ok(StreamEvent::TextDelta("provider-boundary-ok".to_string())),
@@ -526,6 +530,7 @@ async fn state_first_view_reaches_provider_boundary_without_old_raw_turn() {
     for observation in observations {
         assert!(!observation.old_raw_marker_present);
         assert!(observation.current_marker_present);
+        assert!(observation.semantic_marker_present);
         assert!(observation.message_count < agent.session.messages.len());
     }
 }

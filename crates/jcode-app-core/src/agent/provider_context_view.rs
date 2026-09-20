@@ -7,6 +7,8 @@ use super::context_control::message_token_estimate;
 
 #[path = "provider_semantic_state.rs"]
 mod provider_semantic_state;
+#[cfg(test)]
+pub(crate) use provider_semantic_state::BOUNDED_SEMANTIC_STATE_MARKER;
 use provider_semantic_state::BoundedSemanticState;
 #[cfg(test)]
 #[path = "provider_semantic_state_tests.rs"]
@@ -41,6 +43,7 @@ struct RetentionSettings {
     max_projected_turn_groups_before_rebuild: usize,
     workflow_tail_groups: usize,
     semantic_rebuild_interval: Option<usize>,
+    semantic_tail_groups: usize,
 }
 
 fn retention_settings(retention: ContextRetention) -> RetentionSettings {
@@ -53,6 +56,7 @@ fn retention_settings(retention: ContextRetention) -> RetentionSettings {
             max_projected_turn_groups_before_rebuild: 32,
             workflow_tail_groups: 16,
             semantic_rebuild_interval: Some(9),
+            semantic_tail_groups: 4,
         },
         ContextRetention::Mid => RetentionSettings {
             trigger_numerator: 4,
@@ -62,6 +66,7 @@ fn retention_settings(retention: ContextRetention) -> RetentionSettings {
             max_projected_turn_groups_before_rebuild: 24,
             workflow_tail_groups: 8,
             semantic_rebuild_interval: Some(6),
+            semantic_tail_groups: 2,
         },
         ContextRetention::Low => RetentionSettings {
             trigger_numerator: AUTOMATIC_TRIGGER_NUMERATOR,
@@ -71,6 +76,7 @@ fn retention_settings(retention: ContextRetention) -> RetentionSettings {
             max_projected_turn_groups_before_rebuild: MAX_PROJECTED_TURN_GROUPS_BEFORE_REBUILD,
             workflow_tail_groups: 1,
             semantic_rebuild_interval: Some(3),
+            semantic_tail_groups: 1,
         },
         ContextRetention::Disabled => RetentionSettings {
             trigger_numerator: 1,
@@ -80,6 +86,7 @@ fn retention_settings(retention: ContextRetention) -> RetentionSettings {
             max_projected_turn_groups_before_rebuild: usize::MAX,
             workflow_tail_groups: usize::MAX,
             semantic_rebuild_interval: None,
+            semantic_tail_groups: 0,
         },
     }
 }
@@ -390,15 +397,39 @@ impl WorkflowContextProjector {
         let source_prefix_hashes = rolling_prefix_hashes(messages);
         let source_version = source_prefix_hashes.last().copied().unwrap_or(0);
         let ranges = turn_group_ranges(messages);
-        let semantic_projection = if retention == ContextRetention::Low {
+        if self
+            .last_view
+            .is_some_and(|previous| previous.retention != retention)
+        {
+            self.semantic_state.reset();
+        }
+        let semantic_projection = if let Some(rebuild_interval) = settings.semantic_rebuild_interval
+        {
+            let (rebuild_reason, delta_reason) = match retention {
+                ContextRetention::Low => (
+                    "state_first_semantic_low_rebuild",
+                    "state_first_semantic_low_delta",
+                ),
+                ContextRetention::Mid => (
+                    "state_first_semantic_mid_rebuild",
+                    "state_first_semantic_mid_delta",
+                ),
+                ContextRetention::High => (
+                    "state_first_semantic_high_rebuild",
+                    "state_first_semantic_high_delta",
+                ),
+                ContextRetention::Disabled => unreachable!("disabled retention returned early"),
+            };
             self.semantic_state.project(
                 messages,
                 &source_prefix_hashes,
                 &ranges,
-                settings.semantic_rebuild_interval.unwrap_or(3),
+                rebuild_interval,
+                settings.semantic_tail_groups,
+                rebuild_reason,
+                delta_reason,
             )
         } else {
-            self.semantic_state.reset();
             None
         };
         let first_kept_group = ranges
@@ -1051,11 +1082,11 @@ mod tests {
     }
 
     #[test]
-    fn workflow_retention_policy_controls_recent_tail() {
+    fn semantic_retention_policy_controls_recent_tail() {
         let messages = groups(20);
         let cases = [
-            (ContextRetention::High, 16),
-            (ContextRetention::Mid, 8),
+            (ContextRetention::High, 4),
+            (ContextRetention::Mid, 2),
             (ContextRetention::Low, 1),
         ];
 
@@ -1067,6 +1098,7 @@ mod tests {
             assert_eq!(result.mode, "state_first");
             assert_eq!(result.after_turn_groups, expected_groups);
             assert_eq!(result.excluded_turn_groups, 20 - expected_groups);
+            assert!(result.semantic_compressed);
         }
     }
 
