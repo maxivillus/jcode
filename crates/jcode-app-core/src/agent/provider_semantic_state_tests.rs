@@ -1,5 +1,5 @@
 use super::{
-    ContentBlock, ContextRetention, Message, WorkflowContextProjector,
+    ContentBlock, ContextRetention, Message, Role, WorkflowContextProjector,
     provider_semantic_state::BOUNDED_SEMANTIC_STATE_MARKER,
 };
 
@@ -15,6 +15,33 @@ fn user(text: &str) -> Message {
 
 fn assistant(text: &str) -> Message {
     Message::assistant_text(text)
+}
+
+fn tool_call(id: &str) -> Message {
+    Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: "read".to_string(),
+            input: serde_json::json!({"path":"file"}),
+            thought_signature: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }
+}
+
+fn tool_result(id: &str) -> Message {
+    Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: id.to_string(),
+            content: "tool result".to_string(),
+            is_error: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }
 }
 
 fn text_contains(messages: &[Message], needle: &str) -> bool {
@@ -204,4 +231,30 @@ fn high_semantic_state_rebuilds_at_n_nine_and_keeps_four_recent_turns() {
     assert!(result.semantic_state_bytes < result.semantic_replaced_bytes);
     assert!(text_contains(&result.messages, "Amsterdam.today=+24"));
     assert!(text_contains(&result.messages, "day9=+29"));
+}
+
+#[test]
+fn low_semantic_projection_keeps_the_recent_tool_call_result_pair() {
+    let mut messages = weather_messages(3);
+    messages.push(user("Прочитай файл."));
+    messages.push(tool_call("tool-1"));
+    messages.push(tool_result("tool-1"));
+    messages.push(assistant("Файл прочитан."));
+
+    let mut projector = WorkflowContextProjector::default();
+    let result =
+        projector.project_workflow_context_with_retention(&messages, ContextRetention::Low);
+
+    assert!(result.semantic_compressed);
+    assert!(result.messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolUse { id, .. } if id == "tool-1"))
+    }));
+    assert!(result.messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tool-1")
+        })
+    }));
 }

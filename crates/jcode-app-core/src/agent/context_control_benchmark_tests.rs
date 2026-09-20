@@ -124,6 +124,9 @@ struct ProviderBoundaryObservation {
     old_raw_marker_present: bool,
     current_marker_present: bool,
     semantic_marker_present: bool,
+    semantic_marker_count: usize,
+    latest_observation_marker_present: bool,
+    system_present: bool,
 }
 
 #[derive(Clone, Default)]
@@ -137,7 +140,7 @@ impl Provider for ProviderBoundaryProbe {
         &self,
         messages: &[Message],
         _tools: &[ToolDefinition],
-        _system: &str,
+        system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let encoded = serde_json::to_string(messages)
@@ -150,6 +153,9 @@ impl Provider for ProviderBoundaryProbe {
                 old_raw_marker_present: encoded.contains("OLD_RAW_BOUNDARY_MARKER"),
                 current_marker_present: encoded.contains("CURRENT_BOUNDARY_MARKER"),
                 semantic_marker_present: encoded.contains(BOUNDED_SEMANTIC_STATE_MARKER),
+                semantic_marker_count: encoded.matches(BOUNDED_SEMANTIC_STATE_MARKER).count(),
+                latest_observation_marker_present: encoded.contains("LATEST_OBSERVATION_MARKER"),
+                system_present: !system.trim().is_empty(),
             });
         Ok(Box::pin(stream::iter([
             Ok(StreamEvent::TextDelta("provider-boundary-ok".to_string())),
@@ -509,7 +515,11 @@ async fn state_first_view_reaches_provider_boundary_without_old_raw_turn() {
         agent.add_message(
             Role::Assistant,
             vec![ContentBlock::Text {
-                text: format!("historical answer {index}"),
+                text: if index == 19 {
+                    "historical answer 19 LATEST_OBSERVATION_MARKER".to_string()
+                } else {
+                    format!("historical answer {index}")
+                },
                 cache_control: None,
             }],
         );
@@ -531,6 +541,9 @@ async fn state_first_view_reaches_provider_boundary_without_old_raw_turn() {
         assert!(!observation.old_raw_marker_present);
         assert!(observation.current_marker_present);
         assert!(observation.semantic_marker_present);
+        assert_eq!(observation.semantic_marker_count, 1);
+        assert!(observation.latest_observation_marker_present);
+        assert!(observation.system_present);
         assert!(observation.message_count < agent.session.messages.len());
     }
 }
