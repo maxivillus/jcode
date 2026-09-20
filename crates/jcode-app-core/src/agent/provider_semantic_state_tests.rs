@@ -155,33 +155,51 @@ fn low_semantic_state_waits_for_n_three_before_projecting() {
 #[test]
 fn retention_modes_keep_the_planned_rebuild_intervals() {
     assert_eq!(
-        super::retention_settings(ContextRetention::Low).semantic_rebuild_interval,
+        super::retention_settings_with_interval(ContextRetention::Low, None)
+            .semantic_rebuild_interval,
         Some(3)
     );
     assert_eq!(
-        super::retention_settings(ContextRetention::Low).semantic_tail_groups,
+        super::retention_settings_with_interval(ContextRetention::Low, None).semantic_tail_groups,
         1
     );
     assert_eq!(
-        super::retention_settings(ContextRetention::Mid).semantic_rebuild_interval,
+        super::retention_settings_with_interval(ContextRetention::Mid, None)
+            .semantic_rebuild_interval,
         Some(6)
     );
     assert_eq!(
-        super::retention_settings(ContextRetention::Mid).semantic_tail_groups,
+        super::retention_settings_with_interval(ContextRetention::Mid, None).semantic_tail_groups,
         2
     );
     assert_eq!(
-        super::retention_settings(ContextRetention::High).semantic_rebuild_interval,
+        super::retention_settings_with_interval(ContextRetention::High, None)
+            .semantic_rebuild_interval,
         Some(9)
     );
     assert_eq!(
-        super::retention_settings(ContextRetention::High).semantic_tail_groups,
+        super::retention_settings_with_interval(ContextRetention::High, None).semantic_tail_groups,
         4
     );
     assert_eq!(
-        super::retention_settings(ContextRetention::Disabled).semantic_rebuild_interval,
+        super::retention_settings_with_interval(ContextRetention::Disabled, None)
+            .semantic_rebuild_interval,
         None
     );
+}
+
+#[test]
+fn configured_rebuild_interval_overrides_the_mode_default() {
+    let mut projector = WorkflowContextProjector::default();
+    let result = projector.project_workflow_context_with_retention_and_interval(
+        &weather_messages_through(4),
+        ContextRetention::Mid,
+        Some(4),
+    );
+
+    assert_eq!(result.reason, "state_first_semantic_mid_rebuild");
+    assert_eq!(result.after_turn_groups, 2);
+    assert!(result.semantic_compressed);
 }
 
 #[test]
@@ -314,6 +332,25 @@ fn low_semantic_state_handles_non_weather_fact_correction() {
     assert!(text_contains(&result.messages, "project=nebula"));
     assert!(text_contains(&result.messages, "language=rust"));
     assert!(!text_contains(&result.messages, "project=orion"));
+}
+
+#[test]
+fn low_semantic_state_preserves_structured_deployment_constraint() {
+    let marker = "PROJECT=ORION OWNER=MIRA DEADLINE=FRIDAY STATUS=AMBER CITY=AMSTERDAM TODAY=+24C TOMORROW=+26C APPROVAL=GRANTED DEPLOY=READY ACTION=PROCEED";
+    let mut messages = Vec::new();
+    for turn in 1..=3 {
+        messages.push(user(&format!("Проверь текущий план на ходу {turn}.")));
+        messages.push(assistant(marker));
+    }
+
+    let mut projector = WorkflowContextProjector::default();
+    let result =
+        projector.project_workflow_context_with_retention(&messages, ContextRetention::Low);
+
+    assert!(result.semantic_compressed);
+    assert!(text_contains(&result.messages, "approval=GRANTED"));
+    assert!(text_contains(&result.messages, "deploy=READY"));
+    assert!(text_contains(&result.messages, "action=PROCEED"));
 }
 
 fn long_fact_messages(turn_count: usize) -> Vec<Message> {

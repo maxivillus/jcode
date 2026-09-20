@@ -12,6 +12,10 @@ pub struct CompactionConfig {
     /// Disabled leaves emergency provider-limit recovery enabled.
     pub retention: ContextRetention,
 
+    /// Optional semantic retention rebuild interval in turns.
+    /// `None` uses the mode defaults: low=3, mid=6, high=9.
+    pub retention_rebuild_interval: Option<usize>,
+
     /// [proactive] Number of turns to look ahead when projecting token growth
     pub lookahead_turns: usize,
 
@@ -45,6 +49,7 @@ impl Default for CompactionConfig {
         Self {
             mode: CompactionMode::Reactive,
             retention: ContextRetention::Mid,
+            retention_rebuild_interval: None,
             lookahead_turns: 15,
             ewma_alpha: 0.3,
             proactive_floor: 0.40,
@@ -65,6 +70,7 @@ mod tests {
     #[test]
     fn compaction_config_defaults_retention_to_mid() {
         assert_eq!(CompactionConfig::default().retention, ContextRetention::Mid);
+        assert_eq!(CompactionConfig::default().retention_rebuild_interval, None);
 
         let config: CompactionConfig = serde_json::from_str(r#"{"mode":"reactive"}"#)
             .expect("omitted retention should use the default");
@@ -73,5 +79,10 @@ mod tests {
         let uppercase: CompactionConfig = serde_json::from_str(r#"{"retention":"HIGH"}"#)
             .expect("uppercase retention should be accepted");
         assert_eq!(uppercase.retention, ContextRetention::High);
+
+        let configured: CompactionConfig =
+            serde_json::from_str(r#"{"retention":"mid","retention_rebuild_interval":4}"#)
+                .expect("retention rebuild interval should be configurable");
+        assert_eq!(configured.retention_rebuild_interval, Some(4));
     }
 }

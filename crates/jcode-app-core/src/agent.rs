@@ -810,18 +810,27 @@ impl Agent {
     ) -> Vec<Message> {
         let tool_definition_tokens = ToolDefinition::aggregate_prompt_token_estimate(tools);
         let retention = crate::config::config().compaction.retention;
+        let retention_rebuild_interval = crate::config::config()
+            .compaction
+            .retention_rebuild_interval;
         let workflow_context_mode = self.should_use_workflow_context_view();
         let result = if workflow_context_mode {
             self.provider_context_view
-                .project_workflow_context_with_retention(messages, retention)
+                .project_workflow_context_with_retention_and_interval(
+                    messages,
+                    retention,
+                    retention_rebuild_interval,
+                )
         } else {
-            self.provider_context_view.project_with_retention(
-                messages,
-                self.provider.context_window(),
-                split_prompt.estimated_tokens(),
-                tool_definition_tokens,
-                retention,
-            )
+            self.provider_context_view
+                .project_with_retention_and_interval(
+                    messages,
+                    self.provider.context_window(),
+                    split_prompt.estimated_tokens(),
+                    tool_definition_tokens,
+                    retention,
+                    retention_rebuild_interval,
+                )
         };
         if result.representation_changed {
             self.invalidate_provider_context("automatic provider context view changed");

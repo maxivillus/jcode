@@ -10,9 +10,12 @@ mod provider_semantic_state;
 #[cfg(test)]
 pub(crate) use provider_semantic_state::BOUNDED_SEMANTIC_STATE_MARKER;
 use provider_semantic_state::{BoundedSemanticState, SemanticProjectionConfig};
+#[path = "provider_retention.rs"]
+mod provider_retention;
 #[cfg(test)]
 #[path = "provider_semantic_state_tests.rs"]
 mod provider_semantic_state_tests;
+use provider_retention::retention_settings_with_interval;
 
 const RESERVED_OUTPUT_TOKENS: usize = 4096;
 const SAFETY_MARGIN_TOKENS: usize = 512;
@@ -33,63 +36,6 @@ const TOOL_RESULT_OMITTED_NOTE: &str =
     "[older tool result omitted automatically; canonical session retains it]";
 const MEMORY_OMITTED_NOTE: &str =
     "[older memory injection omitted automatically; canonical session retains it]";
-
-#[derive(Debug, Clone, Copy)]
-struct RetentionSettings {
-    trigger_numerator: usize,
-    trigger_denominator: usize,
-    recent_turn_groups: usize,
-    max_turn_groups_before_projection: usize,
-    max_projected_turn_groups_before_rebuild: usize,
-    workflow_tail_groups: usize,
-    semantic_rebuild_interval: Option<usize>,
-    semantic_tail_groups: usize,
-}
-
-fn retention_settings(retention: ContextRetention) -> RetentionSettings {
-    match retention {
-        ContextRetention::High => RetentionSettings {
-            trigger_numerator: 9,
-            trigger_denominator: 10,
-            recent_turn_groups: 16,
-            max_turn_groups_before_projection: 48,
-            max_projected_turn_groups_before_rebuild: 32,
-            workflow_tail_groups: 16,
-            semantic_rebuild_interval: Some(9),
-            semantic_tail_groups: 4,
-        },
-        ContextRetention::Mid => RetentionSettings {
-            trigger_numerator: 4,
-            trigger_denominator: 5,
-            recent_turn_groups: 12,
-            max_turn_groups_before_projection: 32,
-            max_projected_turn_groups_before_rebuild: 24,
-            workflow_tail_groups: 8,
-            semantic_rebuild_interval: Some(6),
-            semantic_tail_groups: 2,
-        },
-        ContextRetention::Low => RetentionSettings {
-            trigger_numerator: AUTOMATIC_TRIGGER_NUMERATOR,
-            trigger_denominator: AUTOMATIC_TRIGGER_DENOMINATOR,
-            recent_turn_groups: RECENT_TURN_GROUPS,
-            max_turn_groups_before_projection: MAX_TURN_GROUPS_BEFORE_PROJECTION,
-            max_projected_turn_groups_before_rebuild: MAX_PROJECTED_TURN_GROUPS_BEFORE_REBUILD,
-            workflow_tail_groups: 1,
-            semantic_rebuild_interval: Some(3),
-            semantic_tail_groups: 1,
-        },
-        ContextRetention::Disabled => RetentionSettings {
-            trigger_numerator: 1,
-            trigger_denominator: 1,
-            recent_turn_groups: usize::MAX,
-            max_turn_groups_before_projection: usize::MAX,
-            max_projected_turn_groups_before_rebuild: usize::MAX,
-            workflow_tail_groups: usize::MAX,
-            semantic_rebuild_interval: None,
-            semantic_tail_groups: 0,
-        },
-    }
-}
 
 type RenderedProjection = (Vec<Message>, usize, usize, usize);
 
@@ -168,6 +114,25 @@ impl WorkflowContextProjector {
         tool_definition_tokens: usize,
         retention: ContextRetention,
     ) -> WorkflowContextView {
+        self.project_with_retention_and_interval(
+            messages,
+            provider_context_limit,
+            system_prompt_tokens,
+            tool_definition_tokens,
+            retention,
+            None,
+        )
+    }
+
+    pub fn project_with_retention_and_interval(
+        &mut self,
+        messages: &[Message],
+        provider_context_limit: usize,
+        system_prompt_tokens: usize,
+        tool_definition_tokens: usize,
+        retention: ContextRetention,
+        rebuild_interval_override: Option<usize>,
+    ) -> WorkflowContextView {
         if retention == ContextRetention::Disabled {
             return self.unmodified_view(
                 messages,
@@ -178,7 +143,7 @@ impl WorkflowContextProjector {
             );
         }
 
-        let settings = retention_settings(retention);
+        let settings = retention_settings_with_interval(retention, rebuild_interval_override);
         let before_tokens = message_token_estimate(messages);
         let before_turn_groups = turn_group_ranges(messages).len();
         let source_prefix_hashes = rolling_prefix_hashes(messages);
@@ -380,6 +345,15 @@ impl WorkflowContextProjector {
         messages: &[Message],
         retention: ContextRetention,
     ) -> WorkflowContextView {
+        self.project_workflow_context_with_retention_and_interval(messages, retention, None)
+    }
+
+    pub fn project_workflow_context_with_retention_and_interval(
+        &mut self,
+        messages: &[Message],
+        retention: ContextRetention,
+        rebuild_interval_override: Option<usize>,
+    ) -> WorkflowContextView {
         if retention == ContextRetention::Disabled {
             self.semantic_state.reset();
             return self.unmodified_view(
@@ -391,7 +365,7 @@ impl WorkflowContextProjector {
             );
         }
 
-        let settings = retention_settings(retention);
+        let settings = retention_settings_with_interval(retention, rebuild_interval_override);
         let before_tokens = message_token_estimate(messages);
         let before_turn_groups = turn_group_ranges(messages).len();
         let source_prefix_hashes = rolling_prefix_hashes(messages);
