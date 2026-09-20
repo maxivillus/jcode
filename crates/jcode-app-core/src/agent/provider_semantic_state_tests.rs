@@ -1,0 +1,134 @@
+use super::{
+    ContentBlock, ContextRetention, Message, WorkflowContextProjector,
+    provider_semantic_state::BOUNDED_SEMANTIC_STATE_MARKER,
+};
+
+impl WorkflowContextProjector {
+    fn semantic_state_facts(&self) -> Option<Vec<String>> {
+        self.semantic_state.facts_for_test()
+    }
+}
+
+fn user(text: &str) -> Message {
+    Message::user(text)
+}
+
+fn assistant(text: &str) -> Message {
+    Message::assistant_text(text)
+}
+
+fn text_contains(messages: &[Message], needle: &str) -> bool {
+    messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text, .. } if text.contains(needle)))
+    })
+}
+
+fn weather_messages(step: usize) -> Vec<Message> {
+    let mut messages = Vec::new();
+    if step >= 1 {
+        messages.push(user("Какая сейчас погода?"));
+        messages.push(assistant("Тепло."));
+    }
+    if step >= 2 {
+        messages.push(user("Какая сейчас погода? А в Амстердаме?"));
+        messages.push(assistant("В Амстердаме тепло, +24."));
+    }
+    if step >= 3 {
+        messages.push(user("Какая сейчас погода? А в Амстердаме? А завтра?"));
+        messages.push(assistant("Тепло. В Амстердаме тепло, +24. Завтра +26."));
+    }
+    messages
+}
+
+#[test]
+fn low_semantic_state_updates_each_step_and_compresses_at_n_three() {
+    let mut projector = WorkflowContextProjector::default();
+
+    let first = projector
+        .project_workflow_context_with_retention(&weather_messages(1), ContextRetention::Low);
+    assert_eq!(first.reason, "state_first_latest_turn");
+    assert_eq!(
+        projector.semantic_state_facts(),
+        Some(vec!["current=warm".to_string()])
+    );
+
+    let second = projector
+        .project_workflow_context_with_retention(&weather_messages(2), ContextRetention::Low);
+    assert_eq!(second.reason, "state_first_latest_turn");
+    assert_eq!(
+        projector.semantic_state_facts(),
+        Some(vec![
+            "Amsterdam.today=+24".to_string(),
+            "current=warm".to_string()
+        ])
+    );
+
+    let third = projector
+        .project_workflow_context_with_retention(&weather_messages(3), ContextRetention::Low);
+    assert_eq!(third.reason, "state_first_semantic_low_rebuild");
+    assert_eq!(third.after_turn_groups, 1);
+    assert!(third.semantic_compressed);
+    assert!(third.semantic_state_bytes < third.semantic_replaced_bytes);
+    assert!(text_contains(&third.messages, "current=warm"));
+    assert!(text_contains(&third.messages, "Amsterdam.today=+24"));
+    assert!(text_contains(&third.messages, "Amsterdam.tomorrow=+26"));
+    assert!(text_contains(
+        &third.messages,
+        BOUNDED_SEMANTIC_STATE_MARKER
+    ));
+}
+
+#[test]
+fn low_semantic_state_replaces_contradictory_weather_fact() {
+    let mut projector = WorkflowContextProjector::default();
+    let initial = weather_messages(3);
+    let _ = projector.project_workflow_context_with_retention(&initial, ContextRetention::Low);
+
+    let mut refreshed = initial;
+    refreshed.push(user("Какая погода в Амстердаме сегодня?"));
+    refreshed.push(assistant("В Амстердаме сегодня +18."));
+    let result =
+        projector.project_workflow_context_with_retention(&refreshed, ContextRetention::Low);
+
+    assert!(result.reason.starts_with("state_first_semantic_low_"));
+    assert!(text_contains(&result.messages, "Amsterdam.today=+18"));
+    assert!(!text_contains(&result.messages, "Amsterdam.today=+24"));
+}
+
+#[test]
+fn low_semantic_state_waits_for_n_three_before_projecting() {
+    let messages = vec![user("q"), assistant("a"), user("q2"), assistant("a2")];
+    let mut projector = WorkflowContextProjector::default();
+    let result =
+        projector.project_workflow_context_with_retention(&messages, ContextRetention::Low);
+
+    assert_eq!(result.reason, "state_first_latest_turn");
+    assert_eq!(result.after_turn_groups, 1);
+    assert!(!text_contains(
+        &result.messages,
+        BOUNDED_SEMANTIC_STATE_MARKER
+    ));
+}
+
+#[test]
+fn retention_modes_keep_the_planned_rebuild_intervals() {
+    assert_eq!(
+        super::retention_settings(ContextRetention::Low).semantic_rebuild_interval,
+        Some(3)
+    );
+    assert_eq!(
+        super::retention_settings(ContextRetention::Mid).semantic_rebuild_interval,
+        Some(6)
+    );
+    assert_eq!(
+        super::retention_settings(ContextRetention::High).semantic_rebuild_interval,
+        Some(9)
+    );
+    assert_eq!(
+        super::retention_settings(ContextRetention::Disabled).semantic_rebuild_interval,
+        None
+    );
+}
