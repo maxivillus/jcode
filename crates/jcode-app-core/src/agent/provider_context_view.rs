@@ -9,7 +9,7 @@ use super::context_control::message_token_estimate;
 mod provider_semantic_state;
 #[cfg(test)]
 pub(crate) use provider_semantic_state::BOUNDED_SEMANTIC_STATE_MARKER;
-use provider_semantic_state::BoundedSemanticState;
+use provider_semantic_state::{BoundedSemanticState, SemanticProjectionConfig};
 #[cfg(test)]
 #[path = "provider_semantic_state_tests.rs"]
 mod provider_semantic_state_tests;
@@ -422,12 +422,14 @@ impl WorkflowContextProjector {
             };
             self.semantic_state.project(
                 messages,
-                &source_prefix_hashes,
-                &ranges,
-                rebuild_interval,
-                settings.semantic_tail_groups,
-                rebuild_reason,
-                delta_reason,
+                SemanticProjectionConfig {
+                    source_prefix_hashes: &source_prefix_hashes,
+                    turn_groups: &ranges,
+                    rebuild_interval,
+                    tail_groups: settings.semantic_tail_groups,
+                    rebuild_reason,
+                    delta_reason,
+                },
             )
         } else {
             None

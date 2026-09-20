@@ -50,6 +50,15 @@ pub(crate) struct SemanticProjection {
     pub replaced_bytes: usize,
 }
 
+pub(crate) struct SemanticProjectionConfig<'a> {
+    pub(crate) source_prefix_hashes: &'a [u64],
+    pub(crate) turn_groups: &'a [(usize, usize)],
+    pub(crate) rebuild_interval: usize,
+    pub(crate) tail_groups: usize,
+    pub(crate) rebuild_reason: &'static str,
+    pub(crate) delta_reason: &'static str,
+}
+
 impl BoundedSemanticState {
     pub(crate) fn reset(&mut self) {
         *self = Self::default();
@@ -58,33 +67,33 @@ impl BoundedSemanticState {
     pub(crate) fn project(
         &mut self,
         messages: &[Message],
-        source_prefix_hashes: &[u64],
-        turn_groups: &[(usize, usize)],
-        rebuild_interval: usize,
-        tail_groups: usize,
-        rebuild_reason: &'static str,
-        delta_reason: &'static str,
+        config: SemanticProjectionConfig<'_>,
     ) -> Option<SemanticProjection> {
-        let source_version = last_hash_or_zero(source_prefix_hashes);
-        let latest_turn_start = turn_groups.last().map(|(start, _)| *start)?;
-        let kept_tail_groups = tail_groups.min(turn_groups.len());
-        let tail_start = turn_groups
-            .get(turn_groups.len().saturating_sub(kept_tail_groups))
+        let source_version = last_hash_or_zero(config.source_prefix_hashes);
+        let latest_turn_start = config.turn_groups.last().map(|(start, _)| *start)?;
+        let kept_tail_groups = config.tail_groups.min(config.turn_groups.len());
+        let tail_start = config
+            .turn_groups
+            .get(config.turn_groups.len().saturating_sub(kept_tail_groups))
             .map(|(start, _)| *start)?;
-        if latest_turn_start == 0 || tail_start == 0 || rebuild_interval == 0 {
-            self.update_from_canonical_source(messages, source_prefix_hashes);
+        if latest_turn_start == 0 || tail_start == 0 || config.rebuild_interval == 0 {
+            self.update_from_canonical_source(messages, config.source_prefix_hashes);
             return None;
         }
 
         let append_only = self.source_message_count > 0
-            && self.source_message_count <= source_prefix_hashes.len()
-            && source_prefix_hashes
+            && self.source_message_count <= config.source_prefix_hashes.len()
+            && config
+                .source_prefix_hashes
                 .get(self.source_message_count.saturating_sub(1))
                 .copied()
                 == Some(self.source_prefix_hash);
         let full_rebuild = self.revision == 0
             || !append_only
-            || turn_groups.len().is_multiple_of(rebuild_interval);
+            || config
+                .turn_groups
+                .len()
+                .is_multiple_of(config.rebuild_interval);
         let delta_range = if full_rebuild {
             0..messages.len()
         } else {
@@ -92,17 +101,17 @@ impl BoundedSemanticState {
         };
         let delta = build_delta(messages, delta_range, source_version);
         if !delta.validate() {
-            self.update_from_canonical_source(messages, source_prefix_hashes);
+            self.update_from_canonical_source(messages, config.source_prefix_hashes);
             return None;
         }
         self.apply_delta(
             delta,
             full_rebuild,
             messages.len(),
-            last_hash_or_zero(source_prefix_hashes),
+            last_hash_or_zero(config.source_prefix_hashes),
         );
 
-        if turn_groups.len() < rebuild_interval {
+        if config.turn_groups.len() < config.rebuild_interval {
             return None;
         }
 
@@ -134,9 +143,9 @@ impl BoundedSemanticState {
         Some(SemanticProjection {
             messages: output,
             reason: if full_rebuild {
-                rebuild_reason
+                config.rebuild_reason
             } else {
-                delta_reason
+                config.delta_reason
             },
             source_version,
             state_bytes,
@@ -270,15 +279,15 @@ fn extract_facts(text: &str, facts: &mut BTreeMap<String, String>) {
     }
     if lower.contains("амстердам") {
         insert_fact(facts, "Amsterdam.today", &temperatures[0]);
-        if lower.contains("завтра") {
-            if let Some(tomorrow) = temperatures.last() {
-                insert_fact(facts, "Amsterdam.tomorrow", tomorrow);
-            }
+        if lower.contains("завтра")
+            && let Some(tomorrow) = temperatures.last()
+        {
+            insert_fact(facts, "Amsterdam.tomorrow", tomorrow);
         }
-    } else if lower.contains("завтра") {
-        if let Some(tomorrow) = temperatures.last() {
-            insert_fact(facts, "weather.tomorrow", tomorrow);
-        }
+    } else if lower.contains("завтра")
+        && let Some(tomorrow) = temperatures.last()
+    {
+        insert_fact(facts, "weather.tomorrow", tomorrow);
     }
 }
 
