@@ -268,6 +268,8 @@ fn extract_facts(text: &str, facts: &mut BTreeMap<String, String>) {
         }
     }
 
+    extract_structured_facts(&normalized, facts);
+
     let lower = normalized.to_lowercase();
     if lower.contains("тепло") {
         insert_fact(facts, "current", "warm");
@@ -288,6 +290,39 @@ fn extract_facts(text: &str, facts: &mut BTreeMap<String, String>) {
         && let Some(tomorrow) = temperatures.last()
     {
         insert_fact(facts, "weather.tomorrow", tomorrow);
+    }
+}
+
+fn extract_structured_facts(text: &str, facts: &mut BTreeMap<String, String>) {
+    for token in text.split_whitespace() {
+        let Some((raw_key, raw_value)) = token.split_once('=') else {
+            continue;
+        };
+        let key = raw_key.trim_matches(|character: char| {
+            !character.is_ascii_alphanumeric()
+                && character != '_'
+                && character != '.'
+                && character != '-'
+        });
+        let value = raw_value
+            .trim_matches(|character: char| matches!(character, ',' | '.' | ';' | ':' | ')' | ']'));
+        if key.is_empty()
+            || value.is_empty()
+            || !key
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphabetic())
+            || !key.chars().all(|character| {
+                character.is_ascii_alphanumeric()
+                    || character == '_'
+                    || character == '.'
+                    || character == '-'
+            })
+        {
+            continue;
+        }
+        let normalized_key = key.to_ascii_lowercase();
+        insert_fact(facts, &normalized_key, value);
     }
 }
 
