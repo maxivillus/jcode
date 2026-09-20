@@ -5,6 +5,15 @@ use crate::message::{
 
 use super::context_control::message_token_estimate;
 
+#[path = "provider_semantic_state.rs"]
+mod provider_semantic_state;
+#[cfg(test)]
+pub(crate) use provider_semantic_state::BOUNDED_SEMANTIC_STATE_MARKER;
+use provider_semantic_state::{BoundedSemanticState, SemanticProjectionConfig};
+#[cfg(test)]
+#[path = "provider_semantic_state_tests.rs"]
+mod provider_semantic_state_tests;
+
 const RESERVED_OUTPUT_TOKENS: usize = 4096;
 const SAFETY_MARGIN_TOKENS: usize = 512;
 const AUTOMATIC_TRIGGER_NUMERATOR: usize = 3;
@@ -33,6 +42,8 @@ struct RetentionSettings {
     max_turn_groups_before_projection: usize,
     max_projected_turn_groups_before_rebuild: usize,
     workflow_tail_groups: usize,
+    semantic_rebuild_interval: Option<usize>,
+    semantic_tail_groups: usize,
 }
 
 fn retention_settings(retention: ContextRetention) -> RetentionSettings {
@@ -44,6 +55,8 @@ fn retention_settings(retention: ContextRetention) -> RetentionSettings {
             max_turn_groups_before_projection: 48,
             max_projected_turn_groups_before_rebuild: 32,
             workflow_tail_groups: 16,
+            semantic_rebuild_interval: Some(9),
+            semantic_tail_groups: 4,
         },
         ContextRetention::Mid => RetentionSettings {
             trigger_numerator: 4,
@@ -52,6 +65,8 @@ fn retention_settings(retention: ContextRetention) -> RetentionSettings {
             max_turn_groups_before_projection: 32,
             max_projected_turn_groups_before_rebuild: 24,
             workflow_tail_groups: 8,
+            semantic_rebuild_interval: Some(6),
+            semantic_tail_groups: 2,
         },
         ContextRetention::Low => RetentionSettings {
             trigger_numerator: AUTOMATIC_TRIGGER_NUMERATOR,
@@ -60,6 +75,8 @@ fn retention_settings(retention: ContextRetention) -> RetentionSettings {
             max_turn_groups_before_projection: MAX_TURN_GROUPS_BEFORE_PROJECTION,
             max_projected_turn_groups_before_rebuild: MAX_PROJECTED_TURN_GROUPS_BEFORE_REBUILD,
             workflow_tail_groups: 1,
+            semantic_rebuild_interval: Some(3),
+            semantic_tail_groups: 1,
         },
         ContextRetention::Disabled => RetentionSettings {
             trigger_numerator: 1,
@@ -68,6 +85,8 @@ fn retention_settings(retention: ContextRetention) -> RetentionSettings {
             max_turn_groups_before_projection: usize::MAX,
             max_projected_turn_groups_before_rebuild: usize::MAX,
             workflow_tail_groups: usize::MAX,
+            semantic_rebuild_interval: None,
+            semantic_tail_groups: 0,
         },
     }
 }
@@ -92,6 +111,7 @@ struct ViewFingerprint {
 pub struct WorkflowContextProjector {
     stable_boundary: Option<Boundary>,
     last_view: Option<ViewFingerprint>,
+    semantic_state: BoundedSemanticState,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +131,9 @@ pub struct WorkflowContextView {
     pub excluded_turn_groups: usize,
     pub summary_messages: usize,
     pub summary_source_version: Option<u64>,
+    pub semantic_state_bytes: usize,
+    pub semantic_replaced_bytes: usize,
+    pub semantic_compressed: bool,
     pub reason: String,
 }
 
@@ -118,6 +141,7 @@ impl WorkflowContextProjector {
     pub fn reset(&mut self) {
         self.stable_boundary = None;
         self.last_view = None;
+        self.semantic_state.reset();
     }
 
     pub fn project(
@@ -282,6 +306,9 @@ impl WorkflowContextProjector {
             excluded_turn_groups,
             summary_messages,
             summary_source_version,
+            semantic_state_bytes: 0,
+            semantic_replaced_bytes: 0,
+            semantic_compressed: false,
             reason,
         }
     }
@@ -331,6 +358,9 @@ impl WorkflowContextProjector {
             excluded_turn_groups: 0,
             summary_messages: 0,
             summary_source_version: None,
+            semantic_state_bytes: 0,
+            semantic_replaced_bytes: 0,
+            semantic_compressed: false,
             reason: reason.to_string(),
         }
     }
@@ -351,6 +381,7 @@ impl WorkflowContextProjector {
         retention: ContextRetention,
     ) -> WorkflowContextView {
         if retention == ContextRetention::Disabled {
+            self.semantic_state.reset();
             return self.unmodified_view(
                 messages,
                 retention,
@@ -363,27 +394,95 @@ impl WorkflowContextProjector {
         let settings = retention_settings(retention);
         let before_tokens = message_token_estimate(messages);
         let before_turn_groups = turn_group_ranges(messages).len();
-        let source_version = rolling_prefix_hashes(messages).last().copied().unwrap_or(0);
+        let source_prefix_hashes = rolling_prefix_hashes(messages);
+        let source_version = source_prefix_hashes.last().copied().unwrap_or(0);
         let ranges = turn_group_ranges(messages);
+        if self
+            .last_view
+            .is_some_and(|previous| previous.retention != retention)
+        {
+            self.semantic_state.reset();
+        }
+        let semantic_projection = if let Some(rebuild_interval) = settings.semantic_rebuild_interval
+        {
+            let (rebuild_reason, delta_reason) = match retention {
+                ContextRetention::Low => (
+                    "state_first_semantic_low_rebuild",
+                    "state_first_semantic_low_delta",
+                ),
+                ContextRetention::Mid => (
+                    "state_first_semantic_mid_rebuild",
+                    "state_first_semantic_mid_delta",
+                ),
+                ContextRetention::High => (
+                    "state_first_semantic_high_rebuild",
+                    "state_first_semantic_high_delta",
+                ),
+                ContextRetention::Disabled => unreachable!("disabled retention returned early"),
+            };
+            self.semantic_state.project(
+                messages,
+                SemanticProjectionConfig {
+                    source_prefix_hashes: &source_prefix_hashes,
+                    turn_groups: &ranges,
+                    rebuild_interval,
+                    tail_groups: settings.semantic_tail_groups,
+                    rebuild_reason,
+                    delta_reason,
+                },
+            )
+        } else {
+            None
+        };
         let first_kept_group = ranges
             .len()
             .saturating_sub(settings.workflow_tail_groups.min(ranges.len()));
         let latest_start = ranges
             .get(first_kept_group)
             .map(|(start, _)| balanced_suffix_start(messages, *start));
-        let (output, reason) = match latest_start {
-            Some(start) if start < messages.len() => (
-                messages[start..].to_vec(),
-                if settings.workflow_tail_groups == 1 {
-                    "state_first_latest_turn".to_string()
-                } else {
-                    "state_first_recent_tail".to_string()
-                },
-            ),
-            _ => (
-                messages.to_vec(),
-                "state_first_no_turn_fallback".to_string(),
-            ),
+        let (
+            output,
+            reason,
+            summary_messages,
+            summary_source_version,
+            semantic_state_bytes,
+            semantic_replaced_bytes,
+            semantic_compressed,
+        ) = if let Some(projection) = semantic_projection {
+            (
+                projection.messages,
+                projection.reason.to_string(),
+                1,
+                Some(projection.source_version),
+                projection.state_bytes,
+                projection.replaced_bytes,
+                true,
+            )
+        } else {
+            match latest_start {
+                Some(start) if start < messages.len() => (
+                    messages[start..].to_vec(),
+                    if settings.workflow_tail_groups == 1 {
+                        "state_first_latest_turn".to_string()
+                    } else {
+                        "state_first_recent_tail".to_string()
+                    },
+                    0,
+                    None,
+                    0,
+                    0,
+                    false,
+                ),
+                _ => (
+                    messages.to_vec(),
+                    "state_first_no_turn_fallback".to_string(),
+                    0,
+                    None,
+                    0,
+                    0,
+                    false,
+                ),
+            }
         };
         let after_tokens = message_token_estimate(&output);
         let after_turn_groups = turn_group_ranges(&output).len();
@@ -424,8 +523,11 @@ impl WorkflowContextProjector {
             after_turn_groups,
             excluded_messages,
             excluded_turn_groups,
-            summary_messages: 0,
-            summary_source_version: None,
+            summary_messages,
+            summary_source_version,
+            semantic_state_bytes,
+            semantic_replaced_bytes,
+            semantic_compressed,
             reason,
         }
     }
@@ -982,11 +1084,11 @@ mod tests {
     }
 
     #[test]
-    fn workflow_retention_policy_controls_recent_tail() {
+    fn semantic_retention_policy_controls_recent_tail() {
         let messages = groups(20);
         let cases = [
-            (ContextRetention::High, 16),
-            (ContextRetention::Mid, 8),
+            (ContextRetention::High, 4),
+            (ContextRetention::Mid, 2),
             (ContextRetention::Low, 1),
         ];
 
@@ -998,6 +1100,7 @@ mod tests {
             assert_eq!(result.mode, "state_first");
             assert_eq!(result.after_turn_groups, expected_groups);
             assert_eq!(result.excluded_turn_groups, 20 - expected_groups);
+            assert!(result.semantic_compressed);
         }
     }
 

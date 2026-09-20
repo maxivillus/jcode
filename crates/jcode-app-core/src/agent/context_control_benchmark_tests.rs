@@ -1,5 +1,7 @@
 use super::*;
-use crate::agent::provider_context_view::WorkflowContextProjector;
+use crate::agent::provider_context_view::{
+    BOUNDED_SEMANTIC_STATE_MARKER, WorkflowContextProjector,
+};
 use crate::context_controller::{ContextActionOutcome, ContextPruneKind, ContextPruneSpec};
 use crate::message::{CacheControl, ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
@@ -121,6 +123,10 @@ struct ProviderBoundaryObservation {
     message_count: usize,
     old_raw_marker_present: bool,
     current_marker_present: bool,
+    semantic_marker_present: bool,
+    semantic_marker_count: usize,
+    latest_observation_marker_present: bool,
+    system_present: bool,
 }
 
 #[derive(Clone, Default)]
@@ -134,7 +140,7 @@ impl Provider for ProviderBoundaryProbe {
         &self,
         messages: &[Message],
         _tools: &[ToolDefinition],
-        _system: &str,
+        system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let encoded = serde_json::to_string(messages)
@@ -146,6 +152,10 @@ impl Provider for ProviderBoundaryProbe {
                 message_count: messages.len(),
                 old_raw_marker_present: encoded.contains("OLD_RAW_BOUNDARY_MARKER"),
                 current_marker_present: encoded.contains("CURRENT_BOUNDARY_MARKER"),
+                semantic_marker_present: encoded.contains(BOUNDED_SEMANTIC_STATE_MARKER),
+                semantic_marker_count: encoded.matches(BOUNDED_SEMANTIC_STATE_MARKER).count(),
+                latest_observation_marker_present: encoded.contains("LATEST_OBSERVATION_MARKER"),
+                system_present: !system.trim().is_empty(),
             });
         Ok(Box::pin(stream::iter([
             Ok(StreamEvent::TextDelta("provider-boundary-ok".to_string())),
@@ -505,7 +515,11 @@ async fn state_first_view_reaches_provider_boundary_without_old_raw_turn() {
         agent.add_message(
             Role::Assistant,
             vec![ContentBlock::Text {
-                text: format!("historical answer {index}"),
+                text: if index == 19 {
+                    "historical answer 19 LATEST_OBSERVATION_MARKER".to_string()
+                } else {
+                    format!("historical answer {index}")
+                },
                 cache_control: None,
             }],
         );
@@ -526,6 +540,67 @@ async fn state_first_view_reaches_provider_boundary_without_old_raw_turn() {
     for observation in observations {
         assert!(!observation.old_raw_marker_present);
         assert!(observation.current_marker_present);
+        assert!(observation.semantic_marker_present);
+        assert_eq!(observation.semantic_marker_count, 1);
+        assert!(observation.latest_observation_marker_present);
+        assert!(observation.system_present);
+        assert!(observation.message_count < agent.session.messages.len());
+    }
+}
+
+#[tokio::test]
+async fn state_first_view_reaches_streaming_provider_boundary_without_old_raw_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let provider = ProviderBoundaryProbe::default();
+    let provider_arc: Arc<dyn Provider> = Arc::new(provider.clone());
+    let registry = Registry::new(provider_arc.clone()).await;
+    let mut agent = Agent::new(provider_arc, registry);
+    agent.active_skill = Some("synthetic-workflow".to_string());
+
+    for index in 0..20 {
+        let user_text = if index == 0 {
+            format!("streaming historical request {index}: OLD_RAW_BOUNDARY_MARKER")
+        } else {
+            format!("streaming historical request {index}")
+        };
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: user_text,
+                cache_control: None,
+            }],
+        );
+        agent.add_message(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: if index == 19 {
+                    "streaming historical answer 19 LATEST_OBSERVATION_MARKER".to_string()
+                } else {
+                    format!("streaming historical answer {index}")
+                },
+                cache_control: None,
+            }],
+        );
+    }
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .run_once_streaming_mpsc("CURRENT_BOUNDARY_MARKER", Vec::new(), None, event_tx)
+        .await
+        .expect("streaming provider boundary probe turn must complete");
+
+    let observations = provider
+        .observations
+        .lock()
+        .expect("streaming provider boundary observation lock")
+        .clone();
+    assert_eq!(observations.len(), 1);
+    for observation in observations {
+        assert!(!observation.old_raw_marker_present);
+        assert!(observation.current_marker_present);
+        assert_eq!(observation.semantic_marker_count, 1);
+        assert!(observation.latest_observation_marker_present);
+        assert!(observation.system_present);
         assert!(observation.message_count < agent.session.messages.len());
     }
 }
