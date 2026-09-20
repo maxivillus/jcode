@@ -315,3 +315,39 @@ fn low_semantic_state_handles_non_weather_fact_correction() {
     assert!(text_contains(&result.messages, "language=rust"));
     assert!(!text_contains(&result.messages, "project=orion"));
 }
+
+fn long_fact_messages(turn_count: usize) -> Vec<Message> {
+    let mut messages = Vec::new();
+    for turn in 1..=turn_count {
+        messages.push(user(&format!("What is the current phase at turn {turn}?")));
+        messages.push(assistant(&format!(
+            "fact:phase=phase-{turn}; fact:owner=team"
+        )));
+    }
+    messages
+}
+
+#[test]
+fn retention_modes_keep_latest_fact_across_a_long_incremental_history() {
+    for (retention, expected_tail_groups) in [
+        (ContextRetention::Low, 1),
+        (ContextRetention::Mid, 2),
+        (ContextRetention::High, 4),
+    ] {
+        let mut projector = WorkflowContextProjector::default();
+        let mut result = None;
+        for turn_count in 1..=100 {
+            result = Some(projector.project_workflow_context_with_retention(
+                &long_fact_messages(turn_count),
+                retention,
+            ));
+        }
+
+        let result = result.expect("long history must produce a final projection");
+        assert!(result.semantic_compressed);
+        assert_eq!(result.after_turn_groups, expected_tail_groups);
+        assert!(text_contains(&result.messages, "phase=phase-100"));
+        assert!(text_contains(&result.messages, "owner=team"));
+        assert!(result.semantic_state_bytes < result.semantic_replaced_bytes);
+    }
+}
