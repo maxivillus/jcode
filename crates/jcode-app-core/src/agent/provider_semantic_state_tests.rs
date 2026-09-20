@@ -258,3 +258,60 @@ fn low_semantic_projection_keeps_the_recent_tool_call_result_pair() {
         })
     }));
 }
+
+#[test]
+fn mid_semantic_projection_keeps_multiple_recent_tool_call_result_pairs() {
+    let mut messages = weather_messages_through(6);
+    messages.push(user("Прочитай конфигурацию."));
+    messages.push(tool_call("tool-1"));
+    messages.push(tool_result("tool-1"));
+    messages.push(assistant("Конфигурация прочитана."));
+    messages.push(user("Прочитай README."));
+    messages.push(tool_call("tool-2"));
+    messages.push(tool_result("tool-2"));
+    messages.push(assistant("README прочитан."));
+
+    let mut projector = WorkflowContextProjector::default();
+    let _ = projector.project_workflow_context_with_retention(
+        &weather_messages_through(6),
+        ContextRetention::Mid,
+    );
+    let result =
+        projector.project_workflow_context_with_retention(&messages, ContextRetention::Mid);
+
+    assert_eq!(result.reason, "state_first_semantic_mid_delta");
+    assert!(result.semantic_compressed);
+    for id in ["tool-1", "tool-2"] {
+        assert!(result.messages.iter().any(|message| {
+            message.content.iter().any(
+                |block| matches!(block, ContentBlock::ToolUse { id: actual, .. } if actual == id),
+            )
+        }));
+        assert!(result.messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id)
+            })
+        }));
+    }
+}
+
+#[test]
+fn low_semantic_state_handles_non_weather_fact_correction() {
+    let messages = vec![
+        user("Какой проект мы собираем?"),
+        assistant("fact:project=orion"),
+        user("На каком языке он написан?"),
+        assistant("fact:language=rust"),
+        user("Исправление названия проекта."),
+        assistant("fact:project=nebula"),
+    ];
+
+    let mut projector = WorkflowContextProjector::default();
+    let result =
+        projector.project_workflow_context_with_retention(&messages, ContextRetention::Low);
+
+    assert!(result.semantic_compressed);
+    assert!(text_contains(&result.messages, "project=nebula"));
+    assert!(text_contains(&result.messages, "language=rust"));
+    assert!(!text_contains(&result.messages, "project=orion"));
+}

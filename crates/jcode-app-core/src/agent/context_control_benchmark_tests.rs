@@ -547,3 +547,60 @@ async fn state_first_view_reaches_provider_boundary_without_old_raw_turn() {
         assert!(observation.message_count < agent.session.messages.len());
     }
 }
+
+#[tokio::test]
+async fn state_first_view_reaches_streaming_provider_boundary_without_old_raw_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let provider = ProviderBoundaryProbe::default();
+    let provider_arc: Arc<dyn Provider> = Arc::new(provider.clone());
+    let registry = Registry::new(provider_arc.clone()).await;
+    let mut agent = Agent::new(provider_arc, registry);
+    agent.active_skill = Some("synthetic-workflow".to_string());
+
+    for index in 0..20 {
+        let user_text = if index == 0 {
+            format!("streaming historical request {index}: OLD_RAW_BOUNDARY_MARKER")
+        } else {
+            format!("streaming historical request {index}")
+        };
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: user_text,
+                cache_control: None,
+            }],
+        );
+        agent.add_message(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: if index == 19 {
+                    "streaming historical answer 19 LATEST_OBSERVATION_MARKER".to_string()
+                } else {
+                    format!("streaming historical answer {index}")
+                },
+                cache_control: None,
+            }],
+        );
+    }
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .run_once_streaming_mpsc("CURRENT_BOUNDARY_MARKER", Vec::new(), None, event_tx)
+        .await
+        .expect("streaming provider boundary probe turn must complete");
+
+    let observations = provider
+        .observations
+        .lock()
+        .expect("streaming provider boundary observation lock")
+        .clone();
+    assert_eq!(observations.len(), 1);
+    for observation in observations {
+        assert!(!observation.old_raw_marker_present);
+        assert!(observation.current_marker_present);
+        assert_eq!(observation.semantic_marker_count, 1);
+        assert!(observation.latest_observation_marker_present);
+        assert!(observation.system_present);
+        assert!(observation.message_count < agent.session.messages.len());
+    }
+}
