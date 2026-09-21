@@ -8,12 +8,13 @@ pub struct CompactionConfig {
     /// Compaction mode: reactive (default), proactive, or semantic
     pub mode: CompactionMode,
 
-    /// Automatic context retention: high, mid (default), low, or disabled.
+    /// Context retention strength: low keeps less context, mid is balanced, high keeps more context.
     /// Disabled leaves emergency provider-limit recovery enabled.
     pub retention: ContextRetention,
 
     /// Optional semantic retention rebuild interval in turns.
     /// `None` uses the mode defaults: low=3, mid=6, high=9.
+    /// `Some(0)` disables retention projection; positive values override the mode default.
     pub retention_rebuild_interval: Option<usize>,
 
     /// [proactive] Number of turns to look ahead when projecting token growth
@@ -84,5 +85,10 @@ mod tests {
             serde_json::from_str(r#"{"retention":"mid","retention_rebuild_interval":4}"#)
                 .expect("retention rebuild interval should be configurable");
         assert_eq!(configured.retention_rebuild_interval, Some(4));
+
+        let disabled: CompactionConfig =
+            serde_json::from_str(r#"{"retention":"mid","retention_rebuild_interval":0}"#)
+                .expect("zero retention rebuild interval should be accepted");
+        assert_eq!(disabled.retention_rebuild_interval, Some(0));
     }
 }

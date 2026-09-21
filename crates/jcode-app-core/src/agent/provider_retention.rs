@@ -22,10 +22,10 @@ pub(super) fn retention_settings_with_interval(
     retention: ContextRetention,
     rebuild_interval_override: Option<usize>,
 ) -> RetentionSettings {
-    let rebuild_interval = |default| {
-        rebuild_interval_override
-            .filter(|interval| *interval > 0)
-            .or(Some(default))
+    let rebuild_interval = |default| match rebuild_interval_override {
+        Some(0) => None,
+        Some(interval) => Some(interval),
+        None => Some(default),
     };
     match retention {
         ContextRetention::High => RetentionSettings {
