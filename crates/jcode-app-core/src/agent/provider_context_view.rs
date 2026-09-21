@@ -133,7 +133,8 @@ impl WorkflowContextProjector {
         retention: ContextRetention,
         rebuild_interval_override: Option<usize>,
     ) -> WorkflowContextView {
-        if retention == ContextRetention::Disabled {
+        if retention == ContextRetention::Disabled || rebuild_interval_override == Some(0) {
+            self.semantic_state.reset();
             return self.unmodified_view(
                 messages,
                 retention,
@@ -354,7 +355,7 @@ impl WorkflowContextProjector {
         retention: ContextRetention,
         rebuild_interval_override: Option<usize>,
     ) -> WorkflowContextView {
-        if retention == ContextRetention::Disabled {
+        if retention == ContextRetention::Disabled || rebuild_interval_override == Some(0) {
             self.semantic_state.reset();
             return self.unmodified_view(
                 messages,
@@ -1094,6 +1095,50 @@ mod tests {
         );
         assert_eq!(result.excluded_messages, 0);
         assert_eq!(result.excluded_turn_groups, 0);
+    }
+
+    #[test]
+    fn zero_rebuild_interval_disables_workflow_and_transcript_retention() {
+        let messages = groups(50);
+
+        let mut workflow_state = WorkflowContextProjector::default();
+        let workflow_result = workflow_state.project_workflow_context_with_retention_and_interval(
+            &messages,
+            ContextRetention::Mid,
+            Some(0),
+        );
+
+        assert_eq!(workflow_result.mode, "disabled");
+        assert_eq!(workflow_result.reason, "retention_disabled");
+        assert_eq!(workflow_result.retention, ContextRetention::Mid);
+        assert!(!workflow_result.active);
+        assert_eq!(workflow_result.excluded_messages, 0);
+        assert_eq!(workflow_result.excluded_turn_groups, 0);
+        assert_eq!(
+            serde_json::to_string(&workflow_result.messages).unwrap(),
+            serde_json::to_string(&messages).unwrap()
+        );
+
+        let mut transcript_state = WorkflowContextProjector::default();
+        let transcript_result = transcript_state.project_with_retention_and_interval(
+            &messages,
+            1_000,
+            0,
+            0,
+            ContextRetention::Mid,
+            Some(0),
+        );
+
+        assert_eq!(transcript_result.mode, "disabled");
+        assert_eq!(transcript_result.reason, "retention_disabled");
+        assert_eq!(transcript_result.retention, ContextRetention::Mid);
+        assert!(!transcript_result.active);
+        assert_eq!(transcript_result.excluded_messages, 0);
+        assert_eq!(transcript_result.excluded_turn_groups, 0);
+        assert_eq!(
+            serde_json::to_string(&transcript_result.messages).unwrap(),
+            serde_json::to_string(&messages).unwrap()
+        );
     }
 
     #[test]

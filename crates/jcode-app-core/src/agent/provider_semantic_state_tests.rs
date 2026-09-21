@@ -186,6 +186,11 @@ fn retention_modes_keep_the_planned_rebuild_intervals() {
             .semantic_rebuild_interval,
         None
     );
+    assert_eq!(
+        super::retention_settings_with_interval(ContextRetention::Mid, Some(0))
+            .semantic_rebuild_interval,
+        None
+    );
 }
 
 #[test]
