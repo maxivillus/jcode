@@ -269,28 +269,6 @@ fn extract_facts(text: &str, facts: &mut BTreeMap<String, String>) {
     }
 
     extract_structured_facts(&normalized, facts);
-
-    let lower = normalized.to_lowercase();
-    if lower.contains("тепло") {
-        insert_fact(facts, "current", "warm");
-    }
-
-    let temperatures = temperature_values(&normalized);
-    if temperatures.is_empty() {
-        return;
-    }
-    if lower.contains("амстердам") {
-        insert_fact(facts, "Amsterdam.today", &temperatures[0]);
-        if lower.contains("завтра")
-            && let Some(tomorrow) = temperatures.last()
-        {
-            insert_fact(facts, "Amsterdam.tomorrow", tomorrow);
-        }
-    } else if lower.contains("завтра")
-        && let Some(tomorrow) = temperatures.last()
-    {
-        insert_fact(facts, "weather.tomorrow", tomorrow);
-    }
 }
 
 fn extract_structured_facts(text: &str, facts: &mut BTreeMap<String, String>) {
@@ -342,22 +320,6 @@ fn insert_fact(facts: &mut BTreeMap<String, String>, key: &str, value: &str) {
     facts.insert(key.to_string(), value.to_string());
 }
 
-fn temperature_values(text: &str) -> Vec<String> {
-    text.split_whitespace()
-        .filter_map(|token| {
-            let value = token.trim_matches(|character: char| {
-                !character.is_ascii_digit() && character != '+' && character != '-'
-            });
-            (value.len() > 1
-                && (value.starts_with('+') || value.starts_with('-'))
-                && value[1..]
-                    .chars()
-                    .all(|character| character.is_ascii_digit()))
-            .then(|| value.to_string())
-        })
-        .collect()
-}
-
 fn last_hash_or_zero(values: &[u64]) -> u64 {
     match values.last() {
         Some(value) => *value,
@@ -376,13 +338,6 @@ fn clip_value(value: &str, max_chars: usize) -> String {
 
 fn compact_observation(value: &str) -> String {
     let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    let temperatures = temperature_values(&normalized);
-    if let Some(value) = temperatures.last() {
-        return value.clone();
-    }
-    if normalized.to_lowercase().contains("тепло") {
-        return "warm".to_string();
-    }
     clip_value(&normalized, MAX_SEMANTIC_OBSERVATION_CHARS.min(48))
 }
 

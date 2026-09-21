@@ -53,33 +53,49 @@ fn text_contains(messages: &[Message], needle: &str) -> bool {
     })
 }
 
-fn weather_messages(step: usize) -> Vec<Message> {
+fn state_messages(step: usize) -> Vec<Message> {
     let mut messages = Vec::new();
     if step >= 1 {
-        messages.push(user("Какая сейчас погода?"));
-        messages.push(assistant("Тепло."));
+        messages.push(user("What is the current project status?"));
+        messages.push(assistant("fact:status=ready"));
     }
     if step >= 2 {
-        messages.push(user("Какая сейчас погода? А в Амстердаме?"));
-        messages.push(assistant("В Амстердаме тепло, +24."));
+        messages.push(user("Who owns the project?"));
+        messages.push(assistant("fact:owner=mira"));
     }
     if step >= 3 {
-        messages.push(user("Какая сейчас погода? А в Амстердаме? А завтра?"));
-        messages.push(assistant("Тепло. В Амстердаме тепло, +24. Завтра +26."));
+        messages.push(user("What is the project deadline?"));
+        messages.push(assistant("fact:deadline=friday"));
     }
     messages
 }
 
-fn weather_messages_through(step: usize) -> Vec<Message> {
-    let mut messages = weather_messages(step.min(3));
+fn state_messages_through(step: usize) -> Vec<Message> {
+    let mut messages = state_messages(step.min(3));
     for current in 4..=step {
-        messages.push(user(&format!("Какая погода? Уточнение {current}")));
-        messages.push(assistant(&format!(
-            "Тепло. fact:day{current}=+{}",
-            20 + current
-        )));
+        messages.push(user(&format!("Record the project update {current}.")));
+        messages.push(assistant(&format!("fact:day{current}=value-{current}")));
     }
     messages
+}
+
+#[test]
+fn semantic_state_ignores_unstructured_domain_examples() {
+    let messages = vec![
+        user("Какая сейчас погода?"),
+        assistant("Тепло. В Амстердаме +24. Завтра +26."),
+        user("Повтори наблюдение."),
+        assistant("Всё ещё тепло. В Амстердаме +24. Завтра +26."),
+        user("Подтверди последнее наблюдение."),
+        assistant("Последнее наблюдение: тепло, в Амстердаме +24, завтра +26."),
+    ];
+
+    let mut projector = WorkflowContextProjector::default();
+    let result =
+        projector.project_workflow_context_with_retention(&messages, ContextRetention::Low);
+
+    assert!(result.semantic_compressed);
+    assert_eq!(projector.semantic_state_facts(), Some(Vec::new()));
 }
 
 #[test]
@@ -87,33 +103,30 @@ fn low_semantic_state_updates_each_step_and_compresses_at_n_three() {
     let mut projector = WorkflowContextProjector::default();
 
     let first = projector
-        .project_workflow_context_with_retention(&weather_messages(1), ContextRetention::Low);
+        .project_workflow_context_with_retention(&state_messages(1), ContextRetention::Low);
     assert_eq!(first.reason, "state_first_latest_turn");
     assert_eq!(
         projector.semantic_state_facts(),
-        Some(vec!["current=warm".to_string()])
+        Some(vec!["status=ready".to_string()])
     );
 
     let second = projector
-        .project_workflow_context_with_retention(&weather_messages(2), ContextRetention::Low);
+        .project_workflow_context_with_retention(&state_messages(2), ContextRetention::Low);
     assert_eq!(second.reason, "state_first_latest_turn");
     assert_eq!(
         projector.semantic_state_facts(),
-        Some(vec![
-            "Amsterdam.today=+24".to_string(),
-            "current=warm".to_string()
-        ])
+        Some(vec!["owner=mira".to_string(), "status=ready".to_string()])
     );
 
     let third = projector
-        .project_workflow_context_with_retention(&weather_messages(3), ContextRetention::Low);
+        .project_workflow_context_with_retention(&state_messages(3), ContextRetention::Low);
     assert_eq!(third.reason, "state_first_semantic_low_rebuild");
     assert_eq!(third.after_turn_groups, 1);
     assert!(third.semantic_compressed);
     assert!(third.semantic_state_bytes < third.semantic_replaced_bytes);
-    assert!(text_contains(&third.messages, "current=warm"));
-    assert!(text_contains(&third.messages, "Amsterdam.today=+24"));
-    assert!(text_contains(&third.messages, "Amsterdam.tomorrow=+26"));
+    assert!(text_contains(&third.messages, "status=ready"));
+    assert!(text_contains(&third.messages, "owner=mira"));
+    assert!(text_contains(&third.messages, "deadline=friday"));
     assert!(text_contains(
         &third.messages,
         BOUNDED_SEMANTIC_STATE_MARKER
@@ -121,20 +134,20 @@ fn low_semantic_state_updates_each_step_and_compresses_at_n_three() {
 }
 
 #[test]
-fn low_semantic_state_replaces_contradictory_weather_fact() {
+fn low_semantic_state_replaces_contradictory_structured_fact() {
     let mut projector = WorkflowContextProjector::default();
-    let initial = weather_messages(3);
+    let initial = state_messages(3);
     let _ = projector.project_workflow_context_with_retention(&initial, ContextRetention::Low);
 
     let mut refreshed = initial;
-    refreshed.push(user("Какая погода в Амстердаме сегодня?"));
-    refreshed.push(assistant("В Амстердаме сегодня +18."));
+    refreshed.push(user("What is the current project status?"));
+    refreshed.push(assistant("fact:status=blocked"));
     let result =
         projector.project_workflow_context_with_retention(&refreshed, ContextRetention::Low);
 
     assert!(result.reason.starts_with("state_first_semantic_low_"));
-    assert!(text_contains(&result.messages, "Amsterdam.today=+18"));
-    assert!(!text_contains(&result.messages, "Amsterdam.today=+24"));
+    assert!(text_contains(&result.messages, "status=blocked"));
+    assert!(!text_contains(&result.messages, "status=ready"));
 }
 
 #[test]
@@ -197,7 +210,7 @@ fn retention_modes_keep_the_planned_rebuild_intervals() {
 fn configured_rebuild_interval_overrides_the_mode_default() {
     let mut projector = WorkflowContextProjector::default();
     let result = projector.project_workflow_context_with_retention_and_interval(
-        &weather_messages_through(4),
+        &state_messages_through(4),
         ContextRetention::Mid,
         Some(4),
     );
@@ -210,41 +223,35 @@ fn configured_rebuild_interval_overrides_the_mode_default() {
 #[test]
 fn mid_semantic_state_rebuilds_at_n_six_and_keeps_two_recent_turns() {
     let mut projector = WorkflowContextProjector::default();
-    let result = projector.project_workflow_context_with_retention(
-        &weather_messages_through(6),
-        ContextRetention::Mid,
-    );
+    let result = projector
+        .project_workflow_context_with_retention(&state_messages_through(6), ContextRetention::Mid);
 
     assert_eq!(result.reason, "state_first_semantic_mid_rebuild");
     assert_eq!(result.after_turn_groups, 2);
     assert!(result.semantic_compressed);
     assert!(result.semantic_state_bytes < result.semantic_replaced_bytes);
-    assert!(text_contains(&result.messages, "current=warm"));
-    assert!(text_contains(&result.messages, "day6=+26"));
+    assert!(text_contains(&result.messages, "status=ready"));
+    assert!(text_contains(&result.messages, "day6=value-6"));
 }
 
 #[test]
 fn mid_semantic_state_applies_delta_between_rebuilds() {
     let mut projector = WorkflowContextProjector::default();
-    let _ = projector.project_workflow_context_with_retention(
-        &weather_messages_through(6),
-        ContextRetention::Mid,
-    );
-    let result = projector.project_workflow_context_with_retention(
-        &weather_messages_through(7),
-        ContextRetention::Mid,
-    );
+    let _ = projector
+        .project_workflow_context_with_retention(&state_messages_through(6), ContextRetention::Mid);
+    let result = projector
+        .project_workflow_context_with_retention(&state_messages_through(7), ContextRetention::Mid);
 
     assert_eq!(result.reason, "state_first_semantic_mid_delta");
     assert_eq!(result.after_turn_groups, 2);
-    assert!(text_contains(&result.messages, "day7=+27"));
+    assert!(text_contains(&result.messages, "day7=value-7"));
 }
 
 #[test]
 fn high_semantic_state_rebuilds_at_n_nine_and_keeps_four_recent_turns() {
     let mut projector = WorkflowContextProjector::default();
     let result = projector.project_workflow_context_with_retention(
-        &weather_messages_through(9),
+        &state_messages_through(9),
         ContextRetention::High,
     );
 
@@ -252,13 +259,13 @@ fn high_semantic_state_rebuilds_at_n_nine_and_keeps_four_recent_turns() {
     assert_eq!(result.after_turn_groups, 4);
     assert!(result.semantic_compressed);
     assert!(result.semantic_state_bytes < result.semantic_replaced_bytes);
-    assert!(text_contains(&result.messages, "Amsterdam.today=+24"));
-    assert!(text_contains(&result.messages, "day9=+29"));
+    assert!(text_contains(&result.messages, "status=ready"));
+    assert!(text_contains(&result.messages, "day9=value-9"));
 }
 
 #[test]
 fn low_semantic_projection_keeps_the_recent_tool_call_result_pair() {
-    let mut messages = weather_messages(3);
+    let mut messages = state_messages(3);
     messages.push(user("Прочитай файл."));
     messages.push(tool_call("tool-1"));
     messages.push(tool_result("tool-1"));
@@ -284,7 +291,7 @@ fn low_semantic_projection_keeps_the_recent_tool_call_result_pair() {
 
 #[test]
 fn mid_semantic_projection_keeps_multiple_recent_tool_call_result_pairs() {
-    let mut messages = weather_messages_through(6);
+    let mut messages = state_messages_through(6);
     messages.push(user("Прочитай конфигурацию."));
     messages.push(tool_call("tool-1"));
     messages.push(tool_result("tool-1"));
@@ -295,10 +302,8 @@ fn mid_semantic_projection_keeps_multiple_recent_tool_call_result_pairs() {
     messages.push(assistant("README прочитан."));
 
     let mut projector = WorkflowContextProjector::default();
-    let _ = projector.project_workflow_context_with_retention(
-        &weather_messages_through(6),
-        ContextRetention::Mid,
-    );
+    let _ = projector
+        .project_workflow_context_with_retention(&state_messages_through(6), ContextRetention::Mid);
     let result =
         projector.project_workflow_context_with_retention(&messages, ContextRetention::Mid);
 
@@ -319,7 +324,7 @@ fn mid_semantic_projection_keeps_multiple_recent_tool_call_result_pairs() {
 }
 
 #[test]
-fn low_semantic_state_handles_non_weather_fact_correction() {
+fn low_semantic_state_handles_structured_fact_correction() {
     let messages = vec![
         user("Какой проект мы собираем?"),
         assistant("fact:project=orion"),
@@ -341,7 +346,7 @@ fn low_semantic_state_handles_non_weather_fact_correction() {
 
 #[test]
 fn low_semantic_state_preserves_structured_deployment_constraint() {
-    let marker = "PROJECT=ORION OWNER=MIRA DEADLINE=FRIDAY STATUS=AMBER CITY=AMSTERDAM TODAY=+24C TOMORROW=+26C APPROVAL=GRANTED DEPLOY=READY ACTION=PROCEED";
+    let marker = "PROJECT=ORION OWNER=MIRA DEADLINE=FRIDAY STATUS=AMBER LOCATION=REMOTE APPROVAL=GRANTED DEPLOY=READY ACTION=PROCEED";
     let mut messages = Vec::new();
     for turn in 1..=3 {
         messages.push(user(&format!("Проверь текущий план на ходу {turn}.")));
