@@ -1003,24 +1003,24 @@ mod tests {
     }
 
     #[test]
-    fn repeated_weather_history_keeps_current_question_and_compresses_old_turns() {
+    fn repeated_state_history_keeps_current_question_and_compresses_old_turns() {
         let mut messages = Vec::new();
         for index in 0..8 {
             messages.push(user(&format!(
-                "Какая сейчас погода? Предыдущий уточняющий шаг {index}."
+                "What is the current project state? Previous clarification step {index}."
             )));
-            messages.push(assistant("Тепло."));
+            messages.push(assistant("The project state is recorded."));
         }
-        messages.push(user(
-            "Какая сейчас погода? Какая погода в Амстердаме? Какая погода будет завтра?",
+        messages.push(user("What is the current project state and latest update?"));
+        messages.push(assistant(
+            "The project is ready. The latest update is recorded.",
         ));
-        messages.push(assistant("Тепло. В Амстердаме +24. Завтра будет +26."));
         let mut state = WorkflowContextProjector::default();
         let result = state.project(&messages, 1_000, 0, 0);
 
         assert_eq!(
             result.messages.last().and_then(first_text).as_deref(),
-            Some("Тепло. В Амстердаме +24. Завтра будет +26.")
+            Some("The project is ready. The latest update is recorded.")
         );
         assert_eq!(result.before_turn_groups, 9);
         assert!(result.active);
@@ -1038,8 +1038,8 @@ mod tests {
         let mut messages = groups(4);
         messages[1] = assistant("old value: source:v1");
         messages.push(user("Check the latest source record."));
-        messages.push(tool_call("weather-call"));
-        messages.push(tool_result("weather-call"));
+        messages.push(tool_call("source-call"));
+        messages.push(tool_result("source-call"));
         messages.push(assistant("updated value: source:v2"));
 
         let mut state = WorkflowContextProjector::default();
